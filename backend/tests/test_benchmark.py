@@ -1,10 +1,8 @@
 import json
 
-from app.benchmark import pipeline, run_pipeline
+from app.benchmark import pipeline
 from app.benchmark.accumulator import MetricAccumulator
 from app.benchmark.compare import compare_fields, compare_tests
-from app.dataset_normalization.models import NormalizedDocument, NormalizedPage
-from app.labeling.models import DocumentLabel, TestRow
 
 
 # --------------------------------------------------------------------------- compare_fields
@@ -16,7 +14,6 @@ def test_compare_fields_counts_exact_matches_and_both_null_as_correct():
     assert failures == []
     assert counters["field_correct"] == 2
     assert counters["field_total"] == 2
-    assert counters["exact_match"] == 1
 
 
 def test_compare_fields_detects_wrong_value():
@@ -45,6 +42,34 @@ def test_compare_fields_detects_wrong_key_when_value_found_elsewhere():
     wrong_key_failures = [f for f in failures if f.error_type == "wrong_key"]
     assert len(wrong_key_failures) == 1
     assert wrong_key_failures[0].key == "patient_name"
+
+
+def test_compare_fields_reassignment_cannot_steal_an_already_correctly_matched_key():
+    """A predicted key that already legitimately matches its OWN
+    ground-truth key must never be reused to explain away a different,
+    genuinely missing field just because the values happen to collide."""
+    gt = {"start_date": "01-Jan-2024", "end_date": "01-Jan-2024"}
+    pred = {"start_date": "01-Jan-2024"}  # end_date is genuinely absent
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert len(failures) == 1
+    assert failures[0].key == "end_date"
+    assert failures[0].error_type == "missing"
+    assert counters["missing"] == 1
+    assert counters["extra"] == 0
+
+
+def test_compare_fields_reassignment_requires_a_unique_candidate():
+    """When a value is genuinely ambiguous (multiple extra predicted keys
+    share it), reassignment must not pick one arbitrarily — both the
+    missing ground-truth field and the extra predicted keys are scored
+    plainly rather than paired into a misleading 'wrong_key' claim."""
+    gt = {"field_a": "NAD"}
+    pred = {"extra_1": "NAD", "extra_2": "NAD"}
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert not any(f.error_type == "wrong_key" for f in failures)
+    assert sum(1 for f in failures if f.error_type == "missing") == 1
+    assert sum(1 for f in failures if f.error_type == "extra") == 2
+    assert counters["extra"] == 2
 
 
 def test_compare_fields_detects_extra_hallucinated_field():
@@ -117,17 +142,38 @@ def test_compare_tests_detects_wrong_key_when_result_reassigned_to_different_tes
     assert any(f.error_type == "wrong_key" for f in failures)
 
 
+def test_compare_tests_does_not_pair_unrelated_rows_sharing_a_boilerplate_result():
+    """Common qualitative results ("NAD", "Absent", "Negative") repeat
+    across many unrelated rows in real lab reports — that must not be
+    treated as proof two differently-named tests are "the same test,
+    relabeled". Ambiguous matches fall back to plain missing/extra."""
+    gt = [
+        {"test_name": "STOOL 2. GIARDIA", "result": "NAD", "unit": None, "reference_range": None},
+        {"test_name": "STOOL 3. CULTURE", "result": "NAD", "unit": None, "reference_range": None},
+    ]
+    pred = [
+        {"test_name": "R.EAR", "result": "NAD", "unit": None, "reference_range": None},
+        {"test_name": "THROAT", "result": "NAD", "unit": None, "reference_range": None},
+    ]
+    failures, counters = compare_tests("LR_1", gt, pred)
+    assert not any(f.error_type == "wrong_key" for f in failures)
+    assert sum(1 for f in failures if f.error_type == "missing") == 2
+    assert sum(1 for f in failures if f.error_type == "extra") == 2
+    assert counters["extra"] == 2
+
+
 # --------------------------------------------------------------------------- accumulator
 
 def test_metric_accumulator_finalize_computes_precision_recall_f1():
     acc = MetricAccumulator()
     acc.add(
-        domain_match=True, extraction_ok=True,
+        domain_match=True, extraction_ok=True, exact_match=False,
         field_counters={"key_tp": 3, "key_fp": 1, "key_fn": 1, "field_correct": 3, "field_total": 4,
-                         "exact_match": 0, "missing": 1, "gt_nonnull_total": 4, "extra": 1,
+                         "missing": 1, "gt_nonnull_total": 4, "extra": 1,
                          "predicted_nonnull_total": 4, "value_correct": 3, "value_total": 4},
         test_counters={"test_gt_total": 0, "test_matched": 0, "test_pred_total": 0,
-                        "result_correct": 0, "unit_correct": 0, "reference_range_correct": 0, "matched_count": 0},
+                        "result_correct": 0, "unit_correct": 0, "reference_range_correct": 0, "matched_count": 0,
+                        "extra": 0},
     )
     metrics = acc.finalize()
     assert metrics["key_precision"] == 0.75  # 3/4
@@ -145,50 +191,7 @@ def test_metric_accumulator_returns_none_for_undefined_ratios_with_no_data():
     assert metrics["document_count"] == 0
 
 
-# --------------------------------------------------------------------------- run_pipeline wrapper
-
-def test_run_production_pipeline_wraps_normalize_and_extract(tmp_path, monkeypatch):
-    source = tmp_path / "a.pdf"
-    source.write_bytes(b"fake pdf bytes")
-
-    fake_normalized = NormalizedDocument(
-        document_id="LR_000001", original_filename="a.pdf", source_path=str(source), source_format="pdf",
-        source_type="born_digital_pdf", page_count=1, status="processed",
-        pages=[NormalizedPage(page_number=1, text="Patient Name: X", extraction_method="pymupdf", ocr_used=False)],
-    )
-    monkeypatch.setattr(run_pipeline, "normalize_file", lambda *a, **k: fake_normalized)
-
-    fake_label = DocumentLabel(
-        document_id="LR_000001", original_filename="a.pdf", domain="medical", page_count=1,
-        source_ocr_used=False, source_ocr_confidence=None, fields={"patient_name": "X"},
-        tests=[TestRow(test_name="Hemoglobin", result="13.5", unit="g/dL", reference_range="13-17")],
-        annotation_status="pending", extraction_status="ok",
-    )
-    monkeypatch.setattr(run_pipeline, "extract_label", lambda **k: fake_label)
-
-    result = run_pipeline.run_production_pipeline("LR_000001", source, {})
-    assert result["pipeline_error"] is None
-    assert result["domain"] == "medical"
-    assert result["fields"] == {"patient_name": "X"}
-    assert result["tests"][0]["test_name"] == "Hemoglobin"
-
-
-def test_run_production_pipeline_scores_an_exception_as_a_failure(tmp_path, monkeypatch):
-    source = tmp_path / "a.pdf"
-    source.write_bytes(b"fake")
-
-    def boom(*a, **k):
-        raise RuntimeError("OCR exploded")
-
-    monkeypatch.setattr(run_pipeline, "normalize_file", boom)
-
-    result = run_pipeline.run_production_pipeline("LR_000001", source, {})
-    assert result["pipeline_error"] == "RuntimeError: OCR exploded"
-    assert result["domain"] is None
-    assert result["fields"] == {}
-
-
-# --------------------------------------------------------------------------- predict (phase 1, resumable, mocked production call)
+# --------------------------------------------------------------------------- score (reads a predictions/ cache, no LLM call itself)
 
 def _write_ground_truth(final_dir, records):
     final_dir.mkdir(parents=True, exist_ok=True)
@@ -205,85 +208,12 @@ def _write_normalized_doc(normalized_dir, document_id, source_type="born_digital
     }), encoding="utf-8")
 
 
-def _write_master_schema(master_schema_dir):
-    master_schema_dir.mkdir(parents=True, exist_ok=True)
-    (master_schema_dir / "master_schema.json").write_text(json.dumps({"domains": {}}), encoding="utf-8")
-
-
 def _write_prediction(predictions_dir, document_id, **overrides):
     predictions_dir.mkdir(parents=True, exist_ok=True)
     prediction = {"domain": None, "fields": {}, "tests": [], "page_count": 1, "pipeline_error": None}
     prediction.update(overrides)
     (predictions_dir / f"{document_id}.json").write_text(json.dumps(prediction), encoding="utf-8")
 
-
-def test_generate_predictions_calls_pipeline_once_per_document_and_caches_to_disk(tmp_path, monkeypatch):
-    from app.benchmark import predict
-
-    final_dir = tmp_path / "final_dataset"
-    master_schema_dir = tmp_path / "master_schema"
-    _write_master_schema(master_schema_dir)
-    source = tmp_path / "a.pdf"
-    source.write_bytes(b"x")
-    _write_ground_truth(final_dir, [
-        {"document_id": "LR_000001", "domain": "medical", "source_format": "pdf", "source_path": str(source),
-         "page_count": 1, "fields": {}, "tests": [], "annotation_status": "approved"},
-    ])
-
-    calls = {"n": 0}
-
-    def fake_run(document_id, source_path, domain_hints):
-        calls["n"] += 1
-        return {"domain": "medical", "fields": {"patient_name": "X"}, "tests": [], "page_count": 1, "pipeline_error": None}
-
-    monkeypatch.setattr(predict, "run_production_pipeline", fake_run)
-
-    predictions_dir = tmp_path / "predictions"
-    stats = predict.generate_predictions(final_dir, predictions_dir, master_schema_dir)
-    assert stats.predicted == 1
-    assert calls["n"] == 1
-    cached = json.loads((predictions_dir / "LR_000001.json").read_text(encoding="utf-8"))
-    assert cached["fields"] == {"patient_name": "X"}
-
-    # Resuming without --force must not re-call the pipeline.
-    stats2 = predict.generate_predictions(final_dir, predictions_dir, master_schema_dir)
-    assert stats2.skipped == 1
-    assert calls["n"] == 1
-
-
-def test_generate_predictions_continues_after_one_document_fails(tmp_path, monkeypatch):
-    from app.benchmark import predict
-
-    final_dir = tmp_path / "final_dataset"
-    master_schema_dir = tmp_path / "master_schema"
-    _write_master_schema(master_schema_dir)
-    good_source = tmp_path / "good.pdf"
-    good_source.write_bytes(b"x")
-    bad_source = tmp_path / "bad.pdf"
-    bad_source.write_bytes(b"y")
-    _write_ground_truth(final_dir, [
-        {"document_id": "LR_000001", "domain": "medical", "source_format": "pdf", "source_path": str(good_source),
-         "page_count": 1, "fields": {}, "tests": [], "annotation_status": "approved"},
-        {"document_id": "LR_000002", "domain": "medical", "source_format": "pdf", "source_path": str(bad_source),
-         "page_count": 1, "fields": {}, "tests": [], "annotation_status": "approved"},
-    ])
-
-    def fake_run(document_id, source_path, domain_hints):
-        if document_id == "LR_000002":
-            return {"domain": None, "fields": {}, "tests": [], "page_count": None, "pipeline_error": "boom"}
-        return {"domain": "medical", "fields": {}, "tests": [], "page_count": 1, "pipeline_error": None}
-
-    from app.benchmark import predict as predict_module
-    monkeypatch.setattr(predict_module, "run_production_pipeline", fake_run)
-
-    predictions_dir = tmp_path / "predictions"
-    stats = predict_module.generate_predictions(final_dir, predictions_dir, master_schema_dir)
-    assert stats.predicted == 1
-    assert stats.failed == 1
-    assert stats.failures[0][0] == "LR_000002"
-
-
-# --------------------------------------------------------------------------- score (phase 2, cheap, reads only the cache)
 
 def test_score_uses_perfect_and_imperfect_cached_predictions_and_aggregates_by_domain_and_format(tmp_path):
     final_dir = tmp_path / "final_dataset"
@@ -327,6 +257,61 @@ def test_score_uses_perfect_and_imperfect_cached_predictions_and_aggregates_by_d
     assert len(rows) == 2
 
 
+def test_score_exact_match_requires_test_rows_to_match_too(tmp_path):
+    """A document with a perfectly correct fields dict but a wrong test
+    result must NOT count as an exact match — the test/result table is the
+    primary payload of most of these reports."""
+    final_dir = tmp_path / "final_dataset"
+    normalized_dir = tmp_path / "normalized_dataset"
+    source = tmp_path / "doc.pdf"
+    source.write_bytes(b"x")
+    _write_ground_truth(final_dir, [
+        {"document_id": "LR_000001", "domain": "medical", "source_format": "pdf", "source_path": str(source),
+         "page_count": 1, "fields": {"patient_name": "John"},
+         "tests": [{"test_name": "Hemoglobin", "result": "13.5", "unit": "g/dL", "reference_range": "13-17"}],
+         "annotation_status": "approved"},
+    ])
+    _write_normalized_doc(normalized_dir, "LR_000001", source_type="born_digital_pdf")
+
+    predictions_dir = tmp_path / "predictions"
+    _write_prediction(
+        predictions_dir, "LR_000001", domain="medical", fields={"patient_name": "John"},
+        tests=[{"test_name": "Hemoglobin", "result": "WRONG", "unit": "g/dL", "reference_range": "13-17"}],
+    )
+
+    _, _, rows = pipeline.score(final_dir, normalized_dir, predictions_dir)
+    assert rows[0]["field_accuracy"] == 1.0  # fields alone look perfect
+    assert rows[0]["exact_match_rate"] == 0.0  # but the test result is wrong, so it isn't an exact match
+
+
+def test_score_hallucination_rate_counts_fabricated_test_rows(tmp_path):
+    """A completely fabricated test row (not present in ground truth) must
+    raise hallucination_rate — previously only hallucinated document-level
+    fields were counted, silently excluding fabricated table rows."""
+    final_dir = tmp_path / "final_dataset"
+    normalized_dir = tmp_path / "normalized_dataset"
+    source = tmp_path / "doc.pdf"
+    source.write_bytes(b"x")
+    _write_ground_truth(final_dir, [
+        {"document_id": "LR_000001", "domain": "medical", "source_format": "pdf", "source_path": str(source),
+         "page_count": 1, "fields": {"patient_name": "John"}, "tests": [], "annotation_status": "approved"},
+    ])
+    _write_normalized_doc(normalized_dir, "LR_000001", source_type="born_digital_pdf")
+
+    predictions_dir = tmp_path / "predictions"
+    _write_prediction(
+        predictions_dir, "LR_000001", domain="medical", fields={"patient_name": "John"},
+        tests=[{"test_name": "Invented Test", "result": "99", "unit": None, "reference_range": None}],
+    )
+
+    results, failures, rows = pipeline.score(final_dir, normalized_dir, predictions_dir)
+    # extra=1 (the fabricated test row); predicted_nonnull_total=2 (that
+    # test row plus the correctly-predicted patient_name field) -> 0.5.
+    assert results["overall_summary"]["hallucination_rate"] == 0.5
+    assert any(f.error_type == "extra" and "Invented Test" in f.key for f in failures)
+    assert rows[0]["exact_match_rate"] == 0.0
+
+
 def test_score_treats_a_missing_or_failed_prediction_as_fully_missing(tmp_path):
     final_dir = tmp_path / "final_dataset"
     normalized_dir = tmp_path / "normalized_dataset"
@@ -356,8 +341,9 @@ def test_score_treats_a_missing_or_failed_prediction_as_fully_missing(tmp_path):
 
 
 def test_score_handles_a_document_with_no_cached_prediction_at_all(tmp_path):
-    """predict.py may not have reached every document yet (interrupted run)
-    — score() must still produce a result for it rather than crash."""
+    """The prediction phase may not have reached every document yet
+    (interrupted run) — score() must still produce a result for it rather
+    than crash."""
     final_dir = tmp_path / "final_dataset"
     normalized_dir = tmp_path / "normalized_dataset"
     source = tmp_path / "doc.pdf"

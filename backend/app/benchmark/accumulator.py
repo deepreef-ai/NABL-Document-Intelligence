@@ -33,17 +33,17 @@ class MetricAccumulator:
     test_result_correct: int = 0
     test_result_total: int = 0  # == matched test rows
 
-    def add(self, *, domain_match: bool, extraction_ok: bool, field_counters: dict, test_counters: dict) -> None:
+    def add(self, *, domain_match: bool, extraction_ok: bool, exact_match: bool, field_counters: dict, test_counters: dict) -> None:
         self.document_count += 1
         self.domain_correct += int(domain_match)
         self.extraction_success += int(extraction_ok)
+        self.exact_match += int(exact_match)
 
         self.key_tp += field_counters["key_tp"]
         self.key_fp += field_counters["key_fp"]
         self.key_fn += field_counters["key_fn"]
         self.field_correct += field_counters["field_correct"]
         self.field_total += field_counters["field_total"]
-        self.exact_match += field_counters["exact_match"]
         self.missing += field_counters["missing"]
         self.gt_nonnull_total += field_counters["gt_nonnull_total"]
         self.extra += field_counters["extra"]
@@ -64,6 +64,13 @@ class MetricAccumulator:
         self.reference_range_correct += test_counters["reference_range_correct"]
         self.test_name_matched += test_counters["test_matched"]
         self.test_name_total += test_counters["test_gt_total"]
+        # Hallucinated rows count on both sides regardless of whether the
+        # hallucination showed up as a document-level field or a fabricated
+        # test/table row — same "extra" concept, same denominator family as
+        # field-level hallucinations (HALLUCINATION_RATE is over every
+        # predicted, non-null item: fields and test rows together).
+        self.extra += test_counters["extra"]
+        self.predicted_nonnull_total += test_counters["test_pred_total"]
 
     def finalize(self) -> dict:
         def ratio(numerator: int, denominator: int) -> float | None:

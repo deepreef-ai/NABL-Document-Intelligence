@@ -2,7 +2,7 @@ from functools import lru_cache
 
 from app.config import Settings, get_settings
 from app.llm.chain import LlmChain
-from app.llm.providers import GeminiProvider, OllamaProvider, OpenAiCompatibleProvider
+from app.llm.providers import GeminiProvider, NovaProvider, OllamaProvider, OpenAiCompatibleProvider
 
 # Only Gemini gets vision — see GeminiProvider's docstring for why. Groq, the
 # HF router, and Ollama are text-only here; a document routed to the vision
@@ -68,6 +68,12 @@ _BUILDERS = {
         s.ollama_base_url, s.ollama_model, s.ollama_timeout_seconds,
         num_thread=s.ollama_num_thread, num_predict=s.ollama_num_predict,
     ),
+    # AWS Bedrock, not a REST key — gated on nova_model (an inference-profile
+    # ID) rather than an API key, since auth is the ambient AWS credential
+    # chain (see NovaProvider's docstring).
+    "nova": lambda s: NovaProvider(
+        s.nova_model, s.nova_region, s.llm_timeout_seconds, max_tokens=s.nova_max_tokens,
+    ) if s.nova_model else None,
 }
 
 

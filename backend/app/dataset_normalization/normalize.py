@@ -28,6 +28,7 @@ from app.documents import local_ocr, pdf_utils
 from app.documents.geometry import Rect
 from app.dataset_normalization.models import NormalizedDocument, NormalizedPage, OcrElement
 from app.dataset_normalization.text_quality import TextQualityThresholds, is_meaningful_page_text
+from app.dataset_normalization.text_repair import repair_glued_words
 
 IMAGE_SOURCE_FORMATS = {".jpg": "jpg", ".jpeg": "jpeg", ".png": "png", ".tif": "tif", ".tiff": "tiff"}
 
@@ -95,13 +96,13 @@ def normalize_pdf(
             png_bytes = pdf_utils.rasterize_page(data, page_index)
             ocr_result = local_ocr.extract_english(png_bytes)
             elements = [
-                OcrElement(text=line, bbox=_rect_to_bbox(box), confidence=ocr_result.confidence)
+                OcrElement(text=repair_glued_words(line), bbox=_rect_to_bbox(box), confidence=ocr_result.confidence)
                 for line, box in zip(ocr_result.lines, ocr_result.boxes)
             ]
             pages.append(
                 NormalizedPage(
                     page_number=page_index + 1,
-                    text=ocr_result.text,
+                    text=repair_glued_words(ocr_result.text),
                     extraction_method="ocr",
                     ocr_used=True,
                     elements=elements,
@@ -149,12 +150,12 @@ def normalize_image(
 
     ocr_result = local_ocr.extract_english(data)
     elements = [
-        OcrElement(text=line, bbox=_rect_to_bbox(box), confidence=ocr_result.confidence)
+        OcrElement(text=repair_glued_words(line), bbox=_rect_to_bbox(box), confidence=ocr_result.confidence)
         for line, box in zip(ocr_result.lines, ocr_result.boxes)
     ]
     page = NormalizedPage(
         page_number=1,
-        text=ocr_result.text,
+        text=repair_glued_words(ocr_result.text),
         extraction_method="ocr",
         ocr_used=True,
         elements=elements,

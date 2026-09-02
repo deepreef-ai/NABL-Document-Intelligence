@@ -1,8 +1,11 @@
 """Each provider must turn an HTTP failure into the right typed exception
 (so llm/chain.py's router can act on it) and must never leak the API key
-into that exception's message — see llm/base.py's classify_http_error."""
+into that exception's message — see llm/base.py's classify_http_error.
+Nova (Bedrock, boto3-based rather than httpx-based) has its own equivalent,
+classify_boto_error, covered separately below."""
 import httpx
 import pytest
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from app.llm.base import (
     LlmAuthError,
@@ -12,7 +15,7 @@ from app.llm.base import (
     LlmRateLimitError,
     LlmTimeoutError,
 )
-from app.llm.providers import GeminiProvider, OllamaProvider, OpenAiCompatibleProvider
+from app.llm.providers import GeminiProvider, NovaProvider, OllamaProvider, OpenAiCompatibleProvider
 
 SECRET = "sk-super-secret-key-do-not-leak"
 
@@ -107,6 +110,83 @@ def test_timeout_is_classified_as_llm_timeout_error(monkeypatch):
     with pytest.raises(LlmTimeoutError) as excinfo:
         provider.generate("system", "hello")
     assert SECRET not in str(excinfo.value)
+
+
+def _client_error(code: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": "boom"}}, "Converse")
+
+
+@pytest.mark.parametrize(
+    "code,expected_exc",
+    [
+        ("ThrottlingException", LlmRateLimitError),
+        ("TooManyRequestsException", LlmRateLimitError),
+        ("AccessDeniedException", LlmAuthError),
+        ("UnrecognizedClientException", LlmAuthError),
+        ("ValidationException", LlmBadRequestError),
+        ("ModelTimeoutException", LlmTimeoutError),
+        ("InternalServerException", LlmProviderError),
+    ],
+)
+def test_nova_classifies_bedrock_error_codes(monkeypatch, code, expected_exc):
+    provider = NovaProvider("us.amazon.nova-2-lite-v1:0", "us-east-1", 30.0)
+
+    class _FakeClient:
+        def converse(self, **kwargs):
+            raise _client_error(code)
+
+    monkeypatch.setattr(provider, "_get_client", lambda: _FakeClient())
+
+    with pytest.raises(expected_exc):
+        provider.generate("system", "hello")
+
+
+def test_nova_classifies_read_timeout():
+    provider = NovaProvider("us.amazon.nova-2-lite-v1:0", "us-east-1", 30.0)
+
+    class _FakeClient:
+        def converse(self, **kwargs):
+            raise ReadTimeoutError(endpoint_url="https://bedrock-runtime.us-east-1.amazonaws.com")
+
+    provider._get_client = lambda: _FakeClient()
+
+    with pytest.raises(LlmTimeoutError):
+        provider.generate("system", "hello")
+
+
+def test_nova_sends_system_prompt_and_parses_converse_reply():
+    provider = NovaProvider("us.amazon.nova-2-lite-v1:0", "us-east-1", 30.0)
+    captured = {}
+
+    class _FakeClient:
+        def converse(self, **kwargs):
+            captured.update(kwargs)
+            return {"output": {"message": {"content": [{"text": "hi there"}]}}}
+
+    provider._get_client = lambda: _FakeClient()
+
+    result = provider.generate("be helpful", "hello")
+    assert result == "hi there"
+    assert captured["system"] == [{"text": "be helpful"}]
+    assert captured["messages"] == [{"role": "user", "content": [{"text": "hello"}]}]
+    assert captured["modelId"] == "us.amazon.nova-2-lite-v1:0"
+
+
+def test_nova_attaches_image_as_a_content_block():
+    provider = NovaProvider("us.amazon.nova-2-lite-v1:0", "us-east-1", 30.0)
+    captured = {}
+
+    class _FakeClient:
+        def converse(self, **kwargs):
+            captured.update(kwargs)
+            return {"output": {"message": {"content": [{"text": "ok"}]}}}
+
+    provider._get_client = lambda: _FakeClient()
+
+    provider.generate("system", "describe this", image=b"fake-bytes", image_media_type="image/jpeg")
+    content = captured["messages"][0]["content"]
+    assert content[0] == {"text": "describe this"}
+    assert content[1] == {"image": {"format": "jpeg", "source": {"bytes": b"fake-bytes"}}}
 
 
 def test_redact_scrubs_secret_from_arbitrary_text():

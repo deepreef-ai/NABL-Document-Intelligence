@@ -1,22 +1,20 @@
-"""Orchestrates Step 9's scoring phase: for every approved document in
-final_dataset/final_labeled_dataset.jsonl, reads the CACHED prediction
-predict.py already produced (via the real production functions Steps 2/5
-use — this module makes no OCR/LLM call itself) and scores it against the
-ground truth (compare.py), pooling results overall, by ground-truth domain,
-and by source format (accumulator.py). No train/validation/test split —
-every document is scored.
+"""Scores a predictions/ directory (one JSON per document, produced by
+generate_predictions_and_score.py's own prediction phase) against
+labelled_dataset's ground truth, pooling results overall, by ground-truth
+domain, and by source format (accumulator.py). No train/validation/test
+split — every document is scored.
 
-Deliberately reads-only from predict.py's prediction cache rather than
-calling the pipeline inline: scoring is cheap and safe to re-run any number
-of times (e.g. after fixing a bug in compare.py) without repeating a single
-expensive OCR/LLM call.
+Deliberately reads a prediction cache from disk rather than taking
+predictions inline: scoring is cheap and safe to re-run any number of times
+(e.g. after fixing a bug in compare.py) without repeating a single
+expensive LLM call.
 
-A production-pipeline failure (OCR/LLM error, unreadable file — recorded by
-predict.py as pipeline_error) is scored as "predicted nothing": every
-ground-truth non-null field/test counts as missing rather than the document
-being silently excluded, so a real failure lowers the reported accuracy
-instead of disappearing from it. A document with no cached prediction at
-all (predict.py hasn't reached it yet) is scored the same way.
+A prediction failure (LLM error, unreadable file — recorded as
+pipeline_error) is scored as "predicted nothing": every ground-truth
+non-null field/test counts as missing rather than the document being
+silently excluded, so a real failure lowers the reported accuracy instead
+of disappearing from it. A document with no cached prediction at all is
+scored the same way.
 """
 from __future__ import annotations
 
@@ -28,8 +26,21 @@ from pathlib import Path
 from app.benchmark.accumulator import MetricAccumulator
 from app.benchmark.compare import compare_fields, compare_tests
 from app.benchmark.models import FieldFailure
-from app.benchmark.predict import load_jsonl
-from app.schema_discovery.domains import CANONICAL_DOMAINS
+
+# Kept here rather than a shared "known domains" module: this is the one
+# remaining consumer since schema-discovery-based auto-labeling was
+# retired in favor of direct (LLM-free) ground-truth authoring.
+CANONICAL_DOMAINS = ["medical", "milk", "food", "water", "soil", "chemical", "other"]
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    records = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
 
 _FORMAT_LABELS = {
     "image": ("image",),
@@ -62,7 +73,7 @@ def _empty_field_counters(ground_truth_fields: dict) -> dict:
     return {
         "key_tp": 0, "key_fp": 0, "key_fn": nonnull,
         "field_correct": 0, "field_total": len(ground_truth_fields),
-        "exact_match": 0, "missing": nonnull, "gt_nonnull_total": nonnull,
+        "missing": nonnull, "gt_nonnull_total": nonnull,
         "extra": 0, "predicted_nonnull_total": 0,
         "value_correct": 0, "value_total": nonnull,
     }
@@ -71,7 +82,7 @@ def _empty_field_counters(ground_truth_fields: dict) -> dict:
 def _empty_test_counters(ground_truth_tests: list[dict]) -> dict:
     return {
         "test_gt_total": len(ground_truth_tests), "test_matched": 0, "test_pred_total": 0,
-        "result_correct": 0, "unit_correct": 0, "reference_range_correct": 0, "matched_count": 0,
+        "result_correct": 0, "unit_correct": 0, "reference_range_correct": 0, "matched_count": 0, "extra": 0,
     }
 
 
@@ -114,14 +125,20 @@ def score(final_dataset_dir: Path, normalized_dir: Path, predictions_dir: Path) 
             ]
             test_counters = _empty_test_counters(ground_truth_tests)
 
+        # A document only counts as an exact match if BOTH its fields AND
+        # its test/result rows are failure-free — a document can have every
+        # metadata field correct while every lab result is wrong, and that
+        # is not an exact match.
+        exact_match = extraction_ok and not field_failures and not test_failures
+
         doc_acc = MetricAccumulator()
-        doc_acc.add(domain_match=domain_match, extraction_ok=extraction_ok, field_counters=field_counters, test_counters=test_counters)
+        doc_acc.add(domain_match=domain_match, extraction_ok=extraction_ok, exact_match=exact_match, field_counters=field_counters, test_counters=test_counters)
         doc_metrics = doc_acc.finalize()
 
-        overall.add(domain_match=domain_match, extraction_ok=extraction_ok, field_counters=field_counters, test_counters=test_counters)
-        by_domain[domain].add(domain_match=domain_match, extraction_ok=extraction_ok, field_counters=field_counters, test_counters=test_counters)
+        overall.add(domain_match=domain_match, extraction_ok=extraction_ok, exact_match=exact_match, field_counters=field_counters, test_counters=test_counters)
+        by_domain[domain].add(domain_match=domain_match, extraction_ok=extraction_ok, exact_match=exact_match, field_counters=field_counters, test_counters=test_counters)
         for bucket in _FORMAT_LABELS.get(source_type, ("unknown",)):
-            by_format[bucket].add(domain_match=domain_match, extraction_ok=extraction_ok, field_counters=field_counters, test_counters=test_counters)
+            by_format[bucket].add(domain_match=domain_match, extraction_ok=extraction_ok, exact_match=exact_match, field_counters=field_counters, test_counters=test_counters)
 
         all_failures.extend(field_failures)
         all_failures.extend(test_failures)

@@ -5,7 +5,7 @@ cooldown independently rather than colliding with the first key's."""
 from types import SimpleNamespace
 
 from app.llm.factory import _build_chain
-from app.llm.providers import GeminiProvider, OllamaProvider, OpenAiCompatibleProvider
+from app.llm.providers import GeminiProvider, NovaProvider, OllamaProvider, OpenAiCompatibleProvider
 
 _DEFAULTS = dict(
     gemini_api_key="", gemini_model="gemini-2.5-flash",
@@ -18,6 +18,7 @@ _DEFAULTS = dict(
     mistral_api_key="", mistral_model="mistral-model",
     nvidia_api_key="", nvidia_model="nvidia-model",
     github_token="", github_model="github-model",
+    nova_model="", nova_region="us-east-1", nova_max_tokens=8192,
     llm_timeout_seconds=30.0,
     ollama_base_url="http://localhost:11434", ollama_model="qwen2.5:3b",
     ollama_timeout_seconds=210.0, ollama_num_thread=0, ollama_num_predict=1024,
@@ -76,3 +77,18 @@ def test_ollama_always_builds_regardless_of_keys():
     chain = _build_chain(_settings(), "ollama")
     assert len(chain.providers) == 1
     assert isinstance(chain.providers[0], OllamaProvider)
+
+
+def test_nova_is_skipped_with_no_model_configured_and_builds_once_set():
+    # Unlike every other provider, gated on an inference-profile ID rather
+    # than an API key — Nova authenticates via the ambient AWS credential
+    # chain, not a credential stored in settings.
+    assert _build_chain(_settings(), "nova").providers == []
+
+    s = _settings(nova_model="us.amazon.nova-2-lite-v1:0", nova_region="ap-south-1")
+    chain = _build_chain(s, "nova")
+    assert len(chain.providers) == 1
+    provider = chain.providers[0]
+    assert isinstance(provider, NovaProvider)
+    assert provider.model == "us.amazon.nova-2-lite-v1:0"
+    assert provider.region == "ap-south-1"

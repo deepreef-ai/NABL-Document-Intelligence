@@ -1,9 +1,12 @@
 import base64
 import os
 
+import boto3
 import httpx
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import BotoCoreError, ClientError
 
-from app.llm.base import LlmProvider, LlmProviderError, classify_http_error
+from app.llm.base import LlmProvider, LlmProviderError, classify_boto_error, classify_http_error
 
 
 class GeminiProvider(LlmProvider):
@@ -212,3 +215,74 @@ class OllamaProvider(LlmProvider):
             return data["message"]["content"]
         except KeyError as exc:
             raise LlmProviderError(f"ollama returned an unexpected response shape: {data}") from exc
+
+
+class NovaProvider(LlmProvider):
+    """Amazon Nova on AWS Bedrock, via the Converse API — boto3, not httpx,
+    so it doesn't share classify_http_error's status-code mapping (see
+    classify_boto_error in base.py instead). Authenticates via the ambient
+    AWS credential chain (same one documents/ocr_client.py already relies
+    on for the OCR Lambda) — no separate API key setting.
+
+    `model` MUST be a region-prefixed inference-profile ID (e.g.
+    "us.amazon.nova-2-lite-v1:0"), not the bare model ID
+    ("amazon.nova-2-lite-v1:0") — MEASURED 2026-09-02: Bedrock rejects
+    on-demand invocation of this model generation by its bare ID with
+    ValidationException ("Retry your request with the ID or ARN of an
+    inference profile that contains this model")."""
+
+    def __init__(self, model: str, region: str, timeout: float, name: str = "nova", max_tokens: int = 8192):
+        self.name = name
+        self.model = model
+        self.region = region
+        self.timeout = timeout
+        # MEASURED 2026-09-02: with no maxTokens set, Bedrock's own default
+        # output cap silently truncated a dense document's JSON reply
+        # mid-object ("...\"voice\": \"(800) 634-" — cut off, not a real
+        # value), which then failed to parse as JSON at all. A document
+        # with a genuinely long results table (hundreds of test rows) needs
+        # real headroom here, not just enough for a short chat reply.
+        self.max_tokens = max_tokens
+        self._client = None
+
+    def _get_client(self):
+        # Constructed lazily (not at __init__ time) so building the provider
+        # object itself never touches the network/credential chain — only
+        # the first real generate() call does, consistent with how a
+        # missing/misconfigured provider elsewhere in this chain only fails
+        # at call time, not at startup.
+        if self._client is None:
+            config = BotoConfig(connect_timeout=self.timeout, read_timeout=self.timeout)
+            self._client = boto3.client("bedrock-runtime", region_name=self.region, config=config)
+        return self._client
+
+    def generate(
+        self,
+        system: str,
+        user_text: str,
+        image: bytes | None = None,
+        image_media_type: str | None = None,
+        want_json: bool = False,
+    ) -> str:
+        content: list[dict] = [{"text": user_text}]
+        if image is not None:
+            image_format = (image_media_type or "image/png").split("/")[-1]
+            if image_format == "jpg":
+                image_format = "jpeg"
+            content.append({"image": {"format": image_format, "source": {"bytes": image}}})
+
+        try:
+            response = self._get_client().converse(
+                modelId=self.model,
+                system=[{"text": system}],
+                messages=[{"role": "user", "content": content}],
+                inferenceConfig={"temperature": 0.2, "maxTokens": self.max_tokens},
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise classify_boto_error(self.name, exc) from exc
+
+        try:
+            parts = response["output"]["message"]["content"]
+            return "".join(part.get("text", "") for part in parts)
+        except (KeyError, IndexError) as exc:
+            raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response}") from exc

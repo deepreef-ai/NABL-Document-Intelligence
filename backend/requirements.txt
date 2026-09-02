@@ -20,10 +20,16 @@ Pillow==12.3.0
 # dependency for the same job, and a second distinct OCR stack alongside
 # deepreef-ocr's RapidOCR) — nothing else in this project imports either.
 rapidocr-onnxruntime>=1.3.0,<2
+# Post-OCR word-resegmentation (dataset_normalization/text_repair.py) — a
+# verified RapidOCR failure mode (dense paragraph text recognized as one
+# unbroken run with no spaces) affects ~12 of this dataset's 50 documents;
+# wordninja's bundled English word-frequency dictionary needs no network
+# access at runtime and no model weights beyond the package itself.
+wordninja==2.0.0
 # CPU-only torch (sentence-transformers pulls it in) — install with:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 # otherwise pip may resolve a much larger CUDA build.
-torch==2.13.0+cpu
+# torch==2.13.0+cpu
 sentence-transformers==6.0.0
 qdrant-client==1.19.0
 reportlab==5.0.1

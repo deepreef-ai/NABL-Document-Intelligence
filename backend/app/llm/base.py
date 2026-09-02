@@ -92,6 +92,30 @@ def classify_http_error(name: str, exc: httpx.HTTPError, *secrets: str) -> LlmPr
     return LlmProviderError(f"{name} call failed: {message}")
 
 
+def classify_boto_error(name: str, exc: Exception) -> LlmProviderError:
+    """Bedrock's equivalent of classify_http_error above — boto3/botocore
+    raise a ClientError carrying an AWS error CODE rather than an HTTP
+    status, so the mapping is code-based instead. No secrets to redact here:
+    Nova (see providers.py's NovaProvider) authenticates via the ambient AWS
+    credential chain, never a key embedded in the request or its error text."""
+    from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+
+    message = str(exc)
+    if isinstance(exc, (ReadTimeoutError, ConnectTimeoutError)):
+        return LlmTimeoutError(f"{name} timed out: {message}")
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("ThrottlingException", "TooManyRequestsException"):
+            return LlmRateLimitError(f"{name} rate-limited ({code}): {message}")
+        if code in ("AccessDeniedException", "UnrecognizedClientException", "UnauthorizedException"):
+            return LlmAuthError(f"{name} auth error ({code}): {message}")
+        if code == "ValidationException":
+            return LlmBadRequestError(f"{name} bad request ({code}): {message}")
+        if code == "ModelTimeoutException":
+            return LlmTimeoutError(f"{name} timed out ({code}): {message}")
+    return LlmProviderError(f"{name} call failed: {message}")
+
+
 class LlmProvider:
     name: str
 

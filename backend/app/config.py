@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # limit, outage, etc.) — set an API key for any subset of these; only
     # Gemini currently gets used for the image-input (vision) calls.
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.6-flash"
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"
     huggingface_api_key: str = ""
@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     cerebras_model: str = "gpt-oss-120b"
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemma-4-31b-it:free"
+    # Amazon Nova on AWS Bedrock (llm/providers.py's NovaProvider) — no API
+    # key setting: authenticates via the ambient AWS credential chain, the
+    # same one documents/ocr_client.py's Lambda invoke already relies on.
+    # Blank model = provider skipped, same convention as every key above.
+    # `nova_model` must be a region-prefixed inference-profile ID (see
+    # NovaProvider's docstring for why the bare model ID is rejected).
+    nova_model: str = ""
+    nova_region: str = "us-east-1"
+    nova_max_tokens: int = 8192
 
     # Extra free-tier OpenAI-chat-completions-compatible providers — same
     # OpenAiCompatibleProvider class, just another base URL/model. Each is

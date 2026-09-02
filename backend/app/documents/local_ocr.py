@@ -1,24 +1,22 @@
-"""Local OCR for English/Latin-script scans — runs the REAL deepreef-ocr
-pipeline in-process, imported directly from that sibling repo's own
-checkout (see config.py's deepreef_ocr_path) rather than a copy kept inside
-this project, so there's exactly one place that code lives. The import
-adds that repo's root to sys.path at call time and then imports its actual
-`engine.py` (DeepReefOCR, the RapidOCR wrapper) and `preprocessor.py`
-(decode_and_resize) — the same two-step pipeline (preprocess, then OCR)
-that repo's own app.py chains together for every real request.
+"""Local OCR for English/Latin-script scans. Preprocessing (orientation
+correction, resize, illumination/contrast normalization) is reused
+in-process from the deepreef-ocr sibling repo's own checkout (see
+config.py's deepreef_ocr_path) rather than duplicated here — imported
+lazily, at call time, from that repo's `preprocessor.py`.
 
-For English specifically, DeepReefOCR needs no baked .onnx file at all: its
-SCRIPTS table maps "english" to RapidOCR's own bundled default recognition
-model. That's what makes this a zero-extra-file, in-process path — no AWS
-call, no Docker, nothing to download — unlike Devanagari/Arabic/Tamil/
-Telugu/Kannada, which still go through the real deployed Lambda
-(documents/ocr_client.py) since baking those models in here would
-duplicate 15MB+ of binaries this project has no other use for.
+Recognition, however, calls `rapidocr_onnxruntime.RapidOCR` DIRECTLY rather
+than going through deepreef-ocr's `DeepReefOCR`/`engine.py`: that repo's
+SCRIPTS table only ships baked recognition models for Devanagari/Arabic/
+Tamil/Telugu/Kannada — see documents/ocr_client.py's SUPPORTED_SCRIPTS
+comment: "notably no English/Latin model. Callers must route English scans
+elsewhere." Calling RapidOCR with no rec_model_path override makes it fall
+back to its own bundled default English/Latin recognition model — no
+baked file, no AWS call, no Docker, nothing to download.
 
 The import is deliberately lazy (deferred until the first real OCR call,
 not done at module load) so a missing/misconfigured sibling checkout only
-breaks English OCR specifically, the same way the previous PaddleOCR-based
-version deferred its own import — not the whole backend's startup.
+breaks the preprocessing step specifically — not the whole backend's
+startup.
 """
 import os
 import sys
@@ -47,14 +45,15 @@ def _ensure_importable() -> None:
 
 
 @lru_cache
-def _engine():
-    _ensure_importable()
-    from deepreef_ocr.engine import DeepReefOCR
+def _rapidocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
 
-    # warm="english": that repo's own default (warm="devanagari") would try
-    # to eagerly load a model file that only exists inside ITS checkout's
-    # deepreef_ocr/models/ for baked non-English scripts — irrelevant here.
-    return DeepReefOCR(warm="english")
+    # No rec_model_path override: RapidOCR loads its own bundled default
+    # English/Latin recognition model, mirroring exactly how deepreef-ocr's
+    # own engine.py would call it for a script with no baked override (see
+    # that file's get_engine(), which only adds rec_model_path when a path
+    # is configured).
+    return RapidOCR()
 
 
 def _decode_and_resize(image_bytes: bytes):
@@ -67,16 +66,21 @@ def _decode_and_resize(image_bytes: bytes):
 def extract_english(image_bytes: bytes) -> OcrResult:
     try:
         image, _meta = _decode_and_resize(image_bytes)
-        ocr_data = _engine().extract(image, script="english")
+        result, _elapsed = _rapidocr_engine()(image)
     except Exception as exc:  # noqa: BLE001 — preprocessor/RapidOCR/import raise several distinct error types
-        raise LocalOcrError(f"deepreef-ocr call failed: {exc}") from exc
+        raise LocalOcrError(f"local OCR call failed: {exc}") from exc
 
-    boxes = [quad_to_rect(quad) for quad in ocr_data["bounding_boxes"]]
+    lines, confidences, boxes = [], [], []
+    for box, text, conf in (result or []):
+        boxes.append(quad_to_rect([[int(pt[0]), int(pt[1])] for pt in box]))
+        lines.append(text)
+        confidences.append(float(conf))
+
     return OcrResult(
-        text=ocr_data["text"],
-        lines=ocr_data["lines"],
-        confidence=ocr_data["confidence"],
+        text=" ".join(lines),
+        lines=lines,
+        confidence=round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
         boxes=boxes,
-        model_used=ocr_data["model_used"],
-        region_count=ocr_data["region_count"],
+        model_used="rapidocr-default-en",
+        region_count=len(lines),
     )

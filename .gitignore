@@ -5,6 +5,7 @@ backend/**/__pycache__/
 backend/*.db
 backend/storage/*
 !backend/storage/.gitkeep
+backend/data/
 .env
 
 # frontend

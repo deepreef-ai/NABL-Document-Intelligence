@@ -7,7 +7,16 @@ A predicted value counts as "wrong_key" (rather than plain "missing") when
 the ground-truth value for one field turns up, unchanged, under a
 DIFFERENT key/test_name in the prediction — that's a genuinely different
 failure mode (the value was found, but mis-attributed) worth distinguishing
-from a value that was never extracted at all.
+from a value that was never extracted at all. Two conditions must hold for
+that reassignment claim to be trustworthy, or it produces nonsense pairings:
+1. The candidate key must not already be legitimately matched to its OWN
+   ground-truth key — otherwise a real match gets "stolen" to explain away
+   an unrelated missing field.
+2. The matching value must be unique among the remaining candidates —
+   common boilerplate results ("NAD", "Absent", "Negative") repeat across
+   many unrelated rows in real lab reports, so "some other row happens to
+   say the same three-letter value" is not evidence of a shared identity.
+   An ambiguous match is scored as plain "missing", not "wrong_key".
 """
 from __future__ import annotations
 
@@ -29,6 +38,17 @@ def _normalize_test_name(name: Any) -> str:
     return "".join(ch for ch in str(name).strip().lower() if ch.isalnum())
 
 
+def _find_unique_reassignment(target_norm: str | None, candidates: dict[str, str | None]) -> str | None:
+    """Among `candidates` (key -> normalized value, already restricted to
+    ones not otherwise consumed), return the one key whose value matches
+    `target_norm` — but only if there is EXACTLY one such key. Zero or
+    multiple matches both mean "not a trustworthy reassignment"."""
+    if target_norm is None:
+        return None
+    matches = [k for k, v in candidates.items() if v == target_norm]
+    return matches[0] if len(matches) == 1 else None
+
+
 def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tuple[list[FieldFailure], dict]:
     gt_present = {k: v for k, v in ground_truth.items() if _normalize_value(v) is not None}
     pred_present = {k: v for k, v in predicted.items() if _normalize_value(v) is not None}
@@ -39,7 +59,15 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
     value_correct = 0
     value_total = 0
     missing = 0
-    extra = 0
+
+    # Only keys that are NOT a legitimate match for their own ground-truth
+    # key are candidates for "value found under a different key" — consumed
+    # (via .pop) as each reassignment is accepted, so the same extra key can
+    # never explain away two different missing fields, and the true "extra"/
+    # hallucinated set at the end is exactly whatever's left unconsumed.
+    # Iterated in sorted order so the outcome never depends on Python's
+    # randomized string-hash seed.
+    extra_candidates = {k: _normalize_value(predicted[k]) for k in sorted(pred_keys - gt_keys)}
 
     for key, gt_value in ground_truth.items():
         gt_norm = _normalize_value(gt_value)
@@ -59,29 +87,26 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
             continue
 
         if pred_norm is None:
-            reassigned_key = next(
-                (k for k, v in predicted.items() if k != key and _normalize_value(v) == gt_norm), None,
-            )
+            reassigned_key = _find_unique_reassignment(gt_norm, extra_candidates)
             if reassigned_key:
                 failures.append(FieldFailure(
                     document_id, key, gt_value, f"found under key {reassigned_key!r}: {predicted[reassigned_key]!r}", "wrong_key",
                 ))
+                del extra_candidates[reassigned_key]
             else:
                 failures.append(FieldFailure(document_id, key, gt_value, None, "missing"))
                 missing += 1
         else:
             failures.append(FieldFailure(document_id, key, gt_value, predicted.get(key), "wrong_value"))
 
-    for key in pred_keys - gt_keys:
+    for key in extra_candidates:
         failures.append(FieldFailure(document_id, key, None, predicted[key], "extra"))
-        extra += 1
 
     counters = {
         "key_tp": len(gt_keys & pred_keys), "key_fp": len(pred_keys - gt_keys), "key_fn": len(gt_keys - pred_keys),
         "field_correct": field_correct, "field_total": len(ground_truth),
-        "exact_match": 1 if not failures else 0,
         "missing": missing, "gt_nonnull_total": len(gt_present),
-        "extra": extra, "predicted_nonnull_total": len(pred_present),
+        "extra": len(extra_candidates), "predicted_nonnull_total": len(pred_present),
         "value_correct": value_correct, "value_total": value_total,
     }
     return failures, counters
@@ -114,31 +139,36 @@ def compare_tests(document_id: str, ground_truth_tests: list[dict], predicted_te
         else:
             failures.append(FieldFailure(document_id, f"tests.{label}.reference_range", gt_row.get("reference_range"), pred_row.get("reference_range"), "wrong_value"))
 
-    unmatched_gt = set(gt_by_name) - set(pred_by_name)
-    unmatched_pred = set(pred_by_name) - set(gt_by_name)
+    unmatched_gt = sorted(set(gt_by_name) - set(pred_by_name))
+    # Candidates for reassignment, keyed by normalized test name -> normalized
+    # result. Consumed (via .pop) as each unique match is accepted, matching
+    # compare_fields' same scoping + uniqueness rules — a boilerplate result
+    # like "NAD"/"Absent"/"Negative" repeats across many unrelated rows in
+    # real lab reports, so it must not be treated as proof of shared identity
+    # unless it is the ONE remaining candidate with that value.
+    extra_candidates = {
+        n: _normalize_value(pred_by_name[n].get("result")) for n in sorted(set(pred_by_name) - set(gt_by_name))
+    }
 
     for name in unmatched_gt:
         gt_row = gt_by_name[name]
         gt_result_norm = _normalize_value(gt_row.get("result"))
-        reassigned = next(
-            (n for n in unmatched_pred if gt_result_norm is not None and _normalize_value(pred_by_name[n].get("result")) == gt_result_norm),
-            None,
-        )
+        reassigned = _find_unique_reassignment(gt_result_norm, extra_candidates)
         if reassigned:
             failures.append(FieldFailure(
                 document_id, f"tests.{gt_row.get('test_name')}", gt_row.get("result"),
                 f"found under test_name {pred_by_name[reassigned].get('test_name')!r}", "wrong_key",
             ))
-            unmatched_pred.discard(reassigned)
+            del extra_candidates[reassigned]
         else:
             failures.append(FieldFailure(document_id, f"tests.{gt_row.get('test_name')}", gt_row.get("result"), None, "missing"))
 
-    for name in unmatched_pred:
+    for name in extra_candidates:
         failures.append(FieldFailure(document_id, f"tests.{pred_by_name[name].get('test_name')}", None, pred_by_name[name].get("result"), "extra"))
 
     counters = {
         "test_gt_total": len(gt_by_name), "test_matched": len(matched), "test_pred_total": len(pred_by_name),
         "result_correct": result_correct, "unit_correct": unit_correct, "reference_range_correct": reference_range_correct,
-        "matched_count": len(matched),
+        "matched_count": len(matched), "extra": len(extra_candidates),
     }
     return failures, counters
