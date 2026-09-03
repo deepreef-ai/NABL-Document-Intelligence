@@ -20,18 +20,56 @@ that reassignment claim to be trustworthy, or it produces nonsense pairings:
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
 from app.benchmark.models import FieldFailure
 
 _PLACEHOLDER_SENTINELS = {"n/a", "na", "null", "none", "-", "--", "tbd", ""}
 
+# MEASURED 2026-09-03 over the 52-document set: a real chunk of "wrong_value"
+# was the same value written two ways — "24.03.2021" vs "24-03-2021", a value
+# wrapped across two lines in one source and one line in the other, or a
+# non-breaking/full-width character from a PDF text layer. Those are
+# transcription cosmetics, not extraction errors, so they are canonicalized
+# on BOTH sides before comparison. Deliberately NOT normalized: month names
+# ("05-Dec-2024" -> "05-12-2024") and field order (d/m vs m/d), because both
+# need an assumption about the source's own convention that a lab report
+# does not state — guessing there would silently mark genuinely different
+# dates as equal.
+_DATE_DMY = re.compile(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$")
+_DATE_YMD = re.compile(r"^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _canonical_date(text: str) -> str | None:
+    """Same date, different separators/zero-padding -> one string. Returns
+    None when `text` is not an all-numeric date, leaving it untouched."""
+    dmy = _DATE_DMY.match(text)
+    if dmy:
+        day, month, year = dmy.groups()
+        return f"{int(day):02d}-{int(month):02d}-{year}"
+    ymd = _DATE_YMD.match(text)
+    if ymd:
+        year, month, day = ymd.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    return None
+
 
 def _normalize_value(value: Any) -> str | None:
     if value is None:
         return None
-    text = str(value).strip().lower()
-    return None if text in _PLACEHOLDER_SENTINELS else text
+    # NFKC folds full-width characters, non-breaking spaces and similar
+    # PDF-text-layer artifacts onto their plain equivalents.
+    text = unicodedata.normalize("NFKC", str(value))
+    # A value wrapped across lines in the source must equal the same value
+    # read as one line — collapse runs of whitespace rather than only
+    # trimming the ends.
+    text = _WHITESPACE.sub(" ", text).strip().lower()
+    if text in _PLACEHOLDER_SENTINELS:
+        return None
+    return _canonical_date(text) or text
 
 
 def _normalize_test_name(name: Any) -> str:
@@ -59,6 +97,12 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
     value_correct = 0
     value_total = 0
     missing = 0
+    # Ground-truth fields whose value WAS extracted, just stored under a
+    # different key name. Counted so accumulator.py can report a
+    # naming-adjusted precision/recall alongside the strict one — see its
+    # finalize(). Kept out of key_tp/key_fp/key_fn, which stay strictly
+    # key-identity based so the primary metric never moves.
+    wrong_key = 0
 
     # Only keys that are NOT a legitimate match for their own ground-truth
     # key are candidates for "value found under a different key" — consumed
@@ -93,6 +137,7 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
                     document_id, key, gt_value, f"found under key {reassigned_key!r}: {predicted[reassigned_key]!r}", "wrong_key",
                 ))
                 del extra_candidates[reassigned_key]
+                wrong_key += 1
             else:
                 failures.append(FieldFailure(document_id, key, gt_value, None, "missing"))
                 missing += 1
@@ -104,6 +149,7 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
 
     counters = {
         "key_tp": len(gt_keys & pred_keys), "key_fp": len(pred_keys - gt_keys), "key_fn": len(gt_keys - pred_keys),
+        "key_wrong_key": wrong_key,
         "field_correct": field_correct, "field_total": len(ground_truth),
         "missing": missing, "gt_nonnull_total": len(gt_present),
         "extra": len(extra_candidates), "predicted_nonnull_total": len(pred_present),

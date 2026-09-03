@@ -120,6 +120,7 @@ export default function ReviewPage() {
                   <div>
                     <p className="form-letterhead-eyebrow">
                       {selectedDocument.doc_type ?? "unclassified"} · via {selectedDocument.extraction_source ?? "n/a"}
+                      {selectedDocument.page_count !== null && ` · ${selectedDocument.page_count} page${selectedDocument.page_count === 1 ? "" : "s"} read`}
                     </p>
                     <h2>{selectedDocument.filename}</h2>
                   </div>
@@ -131,6 +132,17 @@ export default function ReviewPage() {
                   <button onClick={() => handleReextract(selectedDocument.id)}>Re-extract</button>
                 </div>
 
+                {selectedDocument.error && (
+                  <div className="extraction-warnings">
+                    <strong>Extraction notes</strong>
+                    <ul>
+                      {selectedDocument.error.split("; ").map((note, i) => (
+                        <li key={i}>{note}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {selectedDocument.fields.length === 0 ? (
                   <p className="form-empty-state">No structured fields extracted from this document.</p>
                 ) : (
@@ -140,9 +152,12 @@ export default function ReviewPage() {
                         key={f.id}
                         field={f}
                         threshold={threshold}
-                        sourceLabel={selectedDocument.filename}
                         isFocused={f.id === highlightedFieldId}
                         onFocus={() => setHighlightedFieldId(f.id)}
+                        onJumpToPage={() => {
+                          if (f.source_page !== null) setPage(f.source_page);
+                          setHighlightedFieldId(f.id);
+                        }}
                         onSave={(value) => handleSaveField(selectedDocument.id, f.id, value)}
                         onAccept={() => handleAcceptField(selectedDocument.id, f.id, !f.accepted)}
                       />

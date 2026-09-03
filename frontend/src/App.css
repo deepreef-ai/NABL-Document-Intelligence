@@ -739,3 +739,203 @@ button.accepted {
   font-size: 12px;
   border: 1px solid var(--glass-border);
 }
+
+/* Page-coverage indicators (DocumentViewer) — with no page cap in the
+   backend any more, these are how you confirm a long scan was read end to
+   end and see which pages actually produced fields. */
+.document-viewer-page-fields {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.extraction-source-badge {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: var(--glass-bg-soft);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.extraction-source-badge.source-ocr_pdf,
+.extraction-source-badge.source-mixed_pdf {
+  border-color: rgba(217, 119, 6, 0.4);
+  color: #b45309;
+}
+
+.document-viewer-page-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+
+.page-chip {
+  min-width: 28px;
+  padding: 3px 6px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+.page-chip.active {
+  background: linear-gradient(135deg, var(--accent-glass), var(--accent-strong));
+  color: white;
+  border-color: transparent;
+}
+
+/* A page that yielded nothing is worth seeing at a glance — on a scanned
+   document it usually means OCR read that page poorly, not that the page
+   was blank. */
+.page-chip-empty:not(.active) {
+  opacity: 0.45;
+}
+
+.extraction-warnings {
+  margin: 12px 0 4px;
+  padding: 10px 14px;
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: 12px;
+  background: rgba(217, 119, 6, 0.08);
+  font-size: 13px;
+}
+
+.extraction-warnings strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #b45309;
+}
+
+.extraction-warnings ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   Review page — full-bleed app shell.
+
+   The shared .page card (max-width 1240px + 28px radius + big
+   glass shadow) suits the wizard/upload flows, which are short
+   centered columns. It actively hurts the review screen: that
+   width cap is dead space on a wide monitor, and the form is the
+   densest thing in the app — every pixel it loses is a field
+   that wraps or scrolls. So the review screen alone opts out of
+   the card and becomes a real application layout: a fixed top
+   bar, then two panes that fill the viewport.
+
+   Everything below is scoped to .review-page, so no other screen
+   changes. Panels keep a light border + radius so the two halves
+   stay visually separate, but drop the heavy drop-shadow and
+   28px blur — at this density they read as chrome noise, and
+   stacking blurred layers is what made the old screen feel soft
+   rather than sharp.
+   ============================================================ */
+
+.page.review-page {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  min-height: 100vh;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.review-page .review-header {
+  padding: 14px clamp(16px, 2vw, 28px);
+  background: var(--glass-bg-strong);
+  border-bottom: 1px solid var(--border-soft);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+}
+
+.review-page .review-header h1 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.review-page .review-workspace {
+  margin-top: 0;
+  padding: clamp(12px, 1.4vw, 20px);
+  gap: clamp(12px, 1.4vw, 20px);
+}
+
+.review-page .review-content-column {
+  gap: clamp(12px, 1.4vw, 20px);
+}
+
+/* Panels: bordered surfaces, not floating cards. */
+.review-page .document-viewer,
+.review-page .form-letterhead {
+  box-shadow: none;
+  border-color: var(--border-soft);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 14px;
+}
+
+.review-page .form-letterhead {
+  padding: clamp(16px, 1.6vw, 26px);
+}
+
+/* The whole point of reclaiming the width: more field columns
+   before anything wraps. */
+.review-page .form-fields-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 16px 22px;
+}
+
+.review-page .form-letterhead-header {
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom-width: 1px;
+}
+
+.review-page .error {
+  margin: 0;
+  padding: 10px clamp(16px, 2vw, 28px);
+  background: rgba(214, 69, 69, 0.09);
+  border-bottom: 1px solid rgba(214, 69, 69, 0.25);
+}
+
+/* Below the two-pane breakpoint the shell has to scroll as one
+   page again, or the stacked panes get trapped in a 100vh box. */
+@media (max-width: 1024px) {
+  .page.review-page {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+}
+
+/* The page a value was read from, as a jump target. Styled as inline text
+   rather than a button so a grid of 200 of them doesn't read as 200 buttons
+   competing with the real "Confirm" action next to it. */
+.field-page-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.field-page-link:hover:not(:disabled) {
+  background: none;
+  transform: none;
+  box-shadow: none;
+  text-decoration: underline;
+}

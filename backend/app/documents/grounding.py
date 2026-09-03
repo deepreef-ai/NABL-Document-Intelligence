@@ -16,14 +16,19 @@ class FieldResult:
     confidence: float
     source_page: int | None = None
     source_bbox: Rect | None = None
-    source: str = "llm"  # "llm" | "rule_based" | "verification" — see extraction_report.py
+    # "llm" | "rule_based" | "verification" | "open_extraction" — see
+    # extraction_report.py; "open_extraction" fields (documents/extractor.py's
+    # extract_open_fields*) are routed by compiler.py into the compiled
+    # form's extra_fields bucket rather than a named schema attribute.
+    source: str = "llm"
 
 
 @dataclass
 class PipelineResult:
     doc_type: str
     doc_confidence: float
-    extraction_source: str  # "born_digital_pdf" | "docx" | "ocr:<script>" | "vision_llm"
+    # "born_digital_pdf" | "ocr_pdf" | "mixed_pdf" | "docx" | "ocr:<script>" | "vision_llm"
+    extraction_source: str
     fields: list[FieldResult]
     # Non-fatal: e.g. one schema section's LLM call exhausted every provider
     # (all rate-limited/down) while other sections succeeded. The document
@@ -32,6 +37,11 @@ class PipelineResult:
     # routers/documents.py's _run_pipeline — rather than losing every
     # already-successful section over one section's outage.
     extraction_warnings: list[str] = field(default_factory=list)
+    # How many pages were actually read and extracted from. Surfaced all the
+    # way to the review UI on purpose: with no page cap any more, "did it
+    # really read all 17 pages of this scan" is the first question worth
+    # answering when an extraction looks thin, and it's invisible otherwise.
+    page_count: int | None = None
 
 
 def ground(value: str, candidates: list[tuple[str, Rect]]) -> Rect | None:

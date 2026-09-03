@@ -17,6 +17,10 @@ class MetricAccumulator:
     key_tp: int = 0
     key_fp: int = 0
     key_fn: int = 0
+    # Ground-truth values that WERE extracted but under a different key name
+    # (compare.py's "wrong_key"). Reported separately, never folded into
+    # key_tp/fp/fn — see finalize()'s naming-adjusted block.
+    key_wrong_key: int = 0
     field_correct: int = 0
     field_total: int = 0
     exact_match: int = 0
@@ -42,6 +46,7 @@ class MetricAccumulator:
         self.key_tp += field_counters["key_tp"]
         self.key_fp += field_counters["key_fp"]
         self.key_fn += field_counters["key_fn"]
+        self.key_wrong_key += field_counters.get("key_wrong_key", 0)
         self.field_correct += field_counters["field_correct"]
         self.field_total += field_counters["field_total"]
         self.missing += field_counters["missing"]
@@ -76,11 +81,28 @@ class MetricAccumulator:
         def ratio(numerator: int, denominator: int) -> float | None:
             return round(numerator / denominator, 4) if denominator else None
 
-        precision = ratio(self.key_tp, self.key_tp + self.key_fp)
-        recall = ratio(self.key_tp, self.key_tp + self.key_fn)
-        f1 = None
-        if precision is not None and recall is not None:
-            f1 = round(2 * precision * recall / (precision + recall), 4) if (precision + recall) > 0 else 0.0
+        def prf(tp: int, fp: int, fn: int) -> tuple[float | None, float | None, float | None]:
+            p = ratio(tp, tp + fp)
+            r = ratio(tp, tp + fn)
+            if p is None or r is None:
+                return p, r, None
+            return p, r, (round(2 * p * r / (p + r), 4) if (p + r) > 0 else 0.0)
+
+        precision, recall, f1 = prf(self.key_tp, self.key_fp, self.key_fn)
+
+        # Naming-adjusted: credits a ground-truth value that WAS extracted but
+        # under a different key name (compare.py's "wrong_key" — e.g. the model
+        # said "fax" where the label says "lab_fax"). MEASURED 2026-09-03 on
+        # the 52-document set: 88 of 177 apparent false positives are this,
+        # worth ~+0.09 F1. Reported ALONGSIDE the strict figures, never
+        # replacing them: strict is the schema-exact lower bound (the key you
+        # need to fill a specific form slot), adjusted is the value-found
+        # upper bound. Quoting either one alone is misleading.
+        adj_p, adj_r, adj_f1 = prf(
+            self.key_tp + self.key_wrong_key,
+            self.key_fp - self.key_wrong_key,
+            self.key_fn - self.key_wrong_key,
+        )
 
         return {
             "document_count": self.document_count,
@@ -89,6 +111,10 @@ class MetricAccumulator:
             "key_precision": precision,
             "key_recall": recall,
             "key_f1": f1,
+            "renamed_key_count": self.key_wrong_key,
+            "key_precision_naming_adjusted": adj_p,
+            "key_recall_naming_adjusted": adj_r,
+            "key_f1_naming_adjusted": adj_f1,
             "field_accuracy": ratio(self.field_correct, self.field_total),
             "exact_match_rate": ratio(self.exact_match, self.document_count),
             "missing_field_rate": ratio(self.missing, self.gt_nonnull_total),

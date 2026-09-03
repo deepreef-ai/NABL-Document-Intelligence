@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import get_args, get_origin
@@ -195,6 +196,113 @@ def _filter_to_requested_fields(doc_type: str, requested: list[str], returned: l
                 item.get("field"), doc_type, requested,
             )
     return kept
+
+
+# --- Open-ended extraction ---------------------------------------------------
+# Runs unconditionally, alongside extract_fields/extract_fields_vision (never
+# instead of), for every document regardless of doc_type — including "other"
+# and "quality_manual_sop", whose FIELD_SETS are empty and would otherwise
+# never produce a single field. Unlike extract_fields, nothing here is
+# filtered against a known field-name list: the model invents its own names,
+# and documents/compiler.py routes the result into the compiled form's
+# `extra_fields` bucket rather than a named schema attribute.
+_OPEN_SYSTEM = (
+    "You extract every distinct, meaningful piece of information from a document "
+    "as key/value pairs. Skip boilerplate/noise. Do not guess a value that isn't "
+    "actually present.\n\n"
+    "NAMING — take the field name from the DOCUMENT'S OWN printed label, "
+    "lowercased and snake_cased, and nothing more:\n"
+    '- a line reading "Sample Name: CASTOR OIL" is {"field": "sample_name"}, '
+    'not "product_name" or "name_of_sample".\n'
+    '- a line reading "Date: 28-Mar-2023" is {"field": "date"} — do NOT add a '
+    'qualifier the label does not have (not "prescription_date", not '
+    '"report_date").\n'
+    "- only invent a name when the value genuinely has no printed label.\n\n"
+    "REPEATING TABLES — keep one field for the whole table, whose value is a "
+    "JSON array of row objects. Do NOT flatten rows into numbered fields:\n"
+    '- CORRECT: {"field": "medicines", "value": [{"medicine": "X", "dose": '
+    '"1-0-1"}, {"medicine": "Y", "dose": "0-0-1"}]}\n'
+    '- WRONG: medicine_1_name, medicine_1_dose, medicine_2_name, ...'
+)
+
+_OPEN_JSON_INSTRUCTION = (
+    'Respond with ONLY a JSON object, no other text: {"fields": ['
+    '{"field": "<snake_case of the document\'s own label>", '
+    '"value": "<value, or a JSON array of row objects for a table>", '
+    '"confidence": <0.0-1.0>}, ...]}'
+)
+
+# Guardrail against a runaway response, not a budget: the hand-labeled
+# reference documents average ~25 fields and top out at 61, and the old cap
+# of 40 was already truncating real documents mid-extraction (observed on
+# 001_Lab-report). Set well clear of the largest real document instead of
+# just above the average.
+MAX_OPEN_FIELDS = 150
+# Generous enough to hold a JSON-encoded repeating table (a 4-row
+# medication table already runs past 500 chars, and such a value is
+# dropped rather than truncated — see _sanitize_open_fields), while
+# still bounding a runaway single value.
+MAX_OPEN_VALUE_CHARS = 4000
+
+
+def extract_open_fields(text: str) -> list[dict]:
+    prompt = f"Document text:\n\n{text[:8000]}\n\n{_OPEN_JSON_INSTRUCTION}"
+    result = get_llm_chain().generate_json(system=_OPEN_SYSTEM, user_text=prompt)
+    return _sanitize_open_fields(normalize_llm_fields(result["fields"]))
+
+
+def extract_open_fields_vision(image_bytes: bytes, media_type: str) -> list[dict]:
+    result = get_llm_chain().generate_json(
+        system=_OPEN_SYSTEM, user_text=_OPEN_JSON_INSTRUCTION, image=image_bytes, image_media_type=media_type
+    )
+    return _sanitize_open_fields(normalize_llm_fields(result["fields"]))
+
+
+def _sanitize_open_fields(fields: list[dict]) -> list[dict]:
+    """A local guardrail against a runaway/garbage model response — not a
+    schema check (see extract_open_fields' docstring: there is no known field
+    list to check against here). Drops duplicate field names (first wins),
+    truncates absurdly long values, and caps the total row count.
+
+    A repeating table arrives as a LIST of row objects (see _OPEN_SYSTEM) and
+    is JSON-encoded to a string here, because everything downstream of this
+    point — FieldResult.value, documents/grounding.py's ground(), and the
+    ExtractedField String column — handles text, not nested structures. A
+    structure too long to store is DROPPED rather than truncated: cutting a
+    JSON array mid-string yields something that neither parses as JSON nor
+    reads as a value, which is worse than not having the field."""
+    seen: set[str] = set()
+    sanitized: list[dict] = []
+    for item in fields:
+        name = item.get("field")
+        if not name or name in seen:
+            continue
+        value = item.get("value")
+
+        if isinstance(value, (list, dict)):
+            value = json.dumps(value, ensure_ascii=False)
+            if len(value) > MAX_OPEN_VALUE_CHARS:
+                log.warning(
+                    "extractor: dropping open field %r — encoded table is %d chars, over the %d limit",
+                    name, len(value), MAX_OPEN_VALUE_CHARS,
+                )
+                continue
+        elif isinstance(value, str):
+            value = value[:MAX_OPEN_VALUE_CHARS]
+        elif value is not None:
+            # A bare number ("qty": 180) arrives as int/float. Everything
+            # downstream treats a value as text — documents/grounding.py's
+            # ground() calls .strip() on it — so an un-stringified number
+            # raised AttributeError and failed the whole document
+            # (observed on 2 of 53: 'int' object has no attribute 'strip').
+            value = str(value)
+
+        seen.add(name)
+        sanitized.append({"field": name, "value": value, "confidence": item.get("confidence", 0.5)})
+        if len(sanitized) >= MAX_OPEN_FIELDS:
+            log.warning("extractor: open-ended extraction hit the %d-field cap, truncating", MAX_OPEN_FIELDS)
+            break
+    return sanitized
 
 
 # --- Whole-form extraction ---------------------------------------------------

@@ -221,3 +221,50 @@ def test_redact_known_secrets_pulls_every_configured_provider_key(monkeypatch):
     assert "gemini-secret" not in cleaned
     assert "groq-secret" not in cleaned
     assert "cerebras-secret" not in cleaned
+
+
+# --------------------------------------------------------------------------- multi-page image input
+
+def test_nova_sends_every_page_as_its_own_image_block():
+    """A fully-scanned multi-page document must reach the model whole — one
+    image block per page — not page 1 with the rest silently dropped."""
+    from app.llm.providers import NovaProvider
+
+    captured = {}
+
+    class FakeBedrock:
+        def converse(self, **kwargs):
+            captured.update(kwargs)
+            return {"output": {"message": {"content": [{"text": "{}"}]}}}
+
+    provider = NovaProvider("us.amazon.nova-2-lite-v1:0", "us-east-1", 30)
+    provider._client = FakeBedrock()
+
+    pages = [b"page-1-png", b"page-2-png", b"page-3-png"]
+    provider.generate("sys", "read these pages", images=pages, image_media_type="image/png")
+
+    content = captured["messages"][0]["content"]
+    image_blocks = [c for c in content if "image" in c]
+    assert len(image_blocks) == 3
+    assert [b["image"]["source"]["bytes"] for b in image_blocks] == pages
+    assert all(b["image"]["format"] == "png" for b in image_blocks)
+
+
+def test_single_image_providers_refuse_a_multi_page_call_instead_of_dropping_pages():
+    """Silently sending only the first page is the exact bug the `images`
+    parameter exists to prevent, so a provider that can't take several must
+    raise rather than under-read the document."""
+    import pytest
+
+    from app.llm.base import LlmProviderError
+    from app.llm.providers import GeminiProvider, OllamaProvider, OpenAiCompatibleProvider
+
+    pages = [b"page-1", b"page-2"]
+    single_image_providers = [
+        GeminiProvider("key", "gemini-3.6-flash", 10),
+        OpenAiCompatibleProvider("groq", "https://example.invalid/v1", "key", "m", 10, supports_vision=True),
+        OllamaProvider("http://localhost:11434", "qwen2.5:3b", 10),
+    ]
+    for provider in single_image_providers:
+        with pytest.raises(LlmProviderError):
+            provider.generate("sys", "read these", images=pages, image_media_type="image/png")

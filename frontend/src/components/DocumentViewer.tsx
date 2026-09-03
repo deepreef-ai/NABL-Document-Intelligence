@@ -14,6 +14,11 @@ export default function DocumentViewer({ document, page, onPageChange, highlight
 
   const isRenderable = document.content_type !== "" && !document.filename.toLowerCase().endsWith(".docx");
   const boxesOnThisPage = document.fields.filter((f) => f.source_bbox && (f.source_page ?? 0) === page);
+  const pageCount = document.page_count ?? null;
+  // Fields grounded to THIS page — the quickest way to see whether extraction
+  // actually reached the later pages of a long scan or only the first few.
+  const fieldsOnThisPage = document.fields.filter((f) => f.source_page === page).length;
+  const isLastPage = pageCount !== null && page >= pageCount - 1;
 
   if (!isRenderable) {
     return (
@@ -32,11 +37,36 @@ export default function DocumentViewer({ document, page, onPageChange, highlight
         <button onClick={() => onPageChange(Math.max(0, page - 1))} disabled={page === 0}>
           ◀ Prev
         </button>
-        <span>Page {page + 1}</span>
-        <button onClick={() => onPageChange(page + 1)} disabled={renderFailed}>
+        <span>{pageCount !== null ? `Page ${page + 1} of ${pageCount}` : `Page ${page + 1}`}</span>
+        <button onClick={() => onPageChange(page + 1)} disabled={renderFailed || isLastPage}>
           Next ▶
         </button>
+        <span className="document-viewer-page-fields">
+          {fieldsOnThisPage} {fieldsOnThisPage === 1 ? "field" : "fields"} from this page
+        </span>
+        {document.extraction_source && (
+          <span className={`extraction-source-badge source-${document.extraction_source}`}>
+            {document.extraction_source.replace(/_/g, " ")}
+          </span>
+        )}
       </div>
+      {pageCount !== null && pageCount > 1 && (
+        <div className="document-viewer-page-strip">
+          {Array.from({ length: pageCount }, (_, i) => {
+            const count = document.fields.filter((f) => f.source_page === i).length;
+            return (
+              <button
+                key={i}
+                className={`page-chip ${i === page ? "active" : ""} ${count === 0 ? "page-chip-empty" : ""}`}
+                onClick={() => onPageChange(i)}
+                title={`Page ${i + 1} — ${count} field(s) extracted`}
+              >
+                {i + 1}
+              </button>
+            );
+          })}
+        </div>
+      )}
       <div className="document-viewer-canvas">
         {!renderFailed && (
           <img

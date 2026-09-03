@@ -191,6 +191,83 @@ def test_metric_accumulator_returns_none_for_undefined_ratios_with_no_data():
     assert metrics["document_count"] == 0
 
 
+def test_metric_accumulator_reports_naming_adjusted_metrics_alongside_strict_ones():
+    """A ground-truth value extracted under a DIFFERENT key name is a
+    measurement convention, not an extraction failure — reported as its own
+    adjusted figure while the strict key-identity metric stays untouched."""
+    acc = MetricAccumulator()
+    acc.add(
+        domain_match=True, extraction_ok=True, exact_match=False,
+        field_counters={"key_tp": 3, "key_fp": 2, "key_fn": 2, "key_wrong_key": 1,
+                         "field_correct": 3, "field_total": 5, "missing": 1, "gt_nonnull_total": 5,
+                         "extra": 1, "predicted_nonnull_total": 5, "value_correct": 3, "value_total": 5},
+        test_counters={"test_gt_total": 0, "test_matched": 0, "test_pred_total": 0,
+                        "result_correct": 0, "unit_correct": 0, "reference_range_correct": 0, "matched_count": 0,
+                        "extra": 0},
+    )
+    metrics = acc.finalize()
+
+    assert metrics["key_precision"] == 0.6  # strict, unchanged: 3/(3+2)
+    assert metrics["key_recall"] == 0.6
+    assert metrics["renamed_key_count"] == 1
+    # one reassignment moves out of both FP and FN and into TP: 4/(4+1)
+    assert metrics["key_precision_naming_adjusted"] == 0.8
+    assert metrics["key_recall_naming_adjusted"] == 0.8
+
+
+def test_compare_fields_counts_a_reassigned_value_as_a_renamed_key():
+    gt = {"lab_fax": "(405) 290-4046"}
+    pred = {"fax": "(405) 290-4046"}
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert counters["key_wrong_key"] == 1
+    assert counters["key_tp"] == 0  # strict key identity is untouched
+    assert any(f.error_type == "wrong_key" for f in failures)
+
+
+# --------------------------------------------------------------------------- value normalization
+
+def test_compare_fields_treats_the_same_date_written_differently_as_equal():
+    """MEASURED on the real set: "24.03.2021" and "24-03-2021" are the same
+    date recorded with different separators, not a wrong value."""
+    failures, counters = compare_fields("LR_1", {"dated": "24.03.2021"}, {"dated": "24-03-2021"})
+    assert failures == []
+    assert counters["value_correct"] == 1
+
+
+def test_compare_fields_zero_pads_dates_before_comparing():
+    failures, _ = compare_fields("LR_1", {"d": "1/2/2021"}, {"d": "01-02-2021"})
+    assert failures == []
+
+
+def test_compare_fields_does_not_equate_genuinely_different_dates():
+    failures, _ = compare_fields("LR_1", {"d": "24-03-2021"}, {"d": "25-03-2021"})
+    assert [f.error_type for f in failures] == ["wrong_value"]
+
+
+def test_compare_fields_does_not_guess_month_names_against_numbers():
+    """"05-Dec-2024" -> "05-12-2024" needs an assumption the document never
+    states, so it is deliberately left as a mismatch rather than guessed."""
+    failures, _ = compare_fields("LR_1", {"d": "05-12-2024"}, {"d": "05-Dec-2024"})
+    assert [f.error_type for f in failures] == ["wrong_value"]
+
+
+def test_compare_fields_collapses_whitespace_and_line_wrapping():
+    gt = {"address": "M/s. ANNAM FARMS\nNo. 28, Shri Raja"}
+    pred = {"address": "M/s. ANNAM FARMS No. 28,  Shri Raja"}
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert failures == []
+    assert counters["value_correct"] == 1
+
+
+def test_compare_fields_folds_unicode_pdf_text_artifacts():
+    # A PDF text layer can emit full-width digits or a non-breaking space
+    # where the other side has plain ASCII.
+    gt = {"v": "25 mg"}
+    pred = {"v": "２５ mg"}  # full-width 25 + NBSP
+    failures, _ = compare_fields("LR_1", gt, pred)
+    assert failures == []
+
+
 # --------------------------------------------------------------------------- score (reads a predictions/ cache, no LLM call itself)
 
 def _write_ground_truth(final_dir, records):
@@ -371,3 +448,38 @@ def test_write_results_produces_json_and_csv_only_no_splits(tmp_path):
     assert not (output_dir / "train.jsonl").exists()
     assert not (output_dir / "test.jsonl").exists()
     assert not (output_dir / "validation.jsonl").exists()
+
+
+# --------------------------------------------------------------------------- unified_extraction
+
+def test_unified_extraction_drops_keys_the_model_left_empty():
+    """Once OCR text is included the model sees a form's label block and
+    emits keys it has no value for (correctly declining to invent one). A
+    key with no value is not a field — dropped at the shared boundary so
+    neither caller has to filter separately."""
+    from app.documents import unified_extraction
+    from types import SimpleNamespace
+
+    chain = SimpleNamespace(generate_json=lambda *a, **k: {
+        "fields": {"real": "27ABCDE1234F1Z5", "unpaired_label": "", "blank": "   ", "nulled": None},
+        "tests": [{"test_name": "Milk Fat", "result": "3.72"}],
+    })
+    result = unified_extraction.extract(chain, unified_extraction.DocumentPayload(text_blocks=["x"]))
+
+    assert result["fields"] == {"real": "27ABCDE1234F1Z5"}
+    assert len(result["tests"]) == 1
+
+
+def test_unified_extraction_survives_a_non_dict_reply():
+    from app.documents import unified_extraction
+    from types import SimpleNamespace
+
+    chain = SimpleNamespace(generate_json=lambda *a, **k: ["not", "a", "dict"])
+    assert unified_extraction.extract(chain, unified_extraction.DocumentPayload()) == {"fields": {}, "tests": []}
+
+
+def test_unified_extraction_payload_falls_back_to_an_image_only_prompt():
+    from app.documents import unified_extraction
+
+    payload = unified_extraction.DocumentPayload(images=[b"png1", b"png2"])
+    assert "2 attached page image(s)" in payload.user_text

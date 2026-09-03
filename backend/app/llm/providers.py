@@ -35,7 +35,13 @@ class GeminiProvider(LlmProvider):
         image: bytes | None = None,
         image_media_type: str | None = None,
         want_json: bool = False,
+        images: list[bytes] | None = None,
     ) -> str:
+        if images and len(images) > 1:
+            # Refuse rather than send page 1 and pretend the rest were read —
+            # see LlmProvider.generate's docstring.
+            raise LlmProviderError(f"{self.name} takes one image per request, got {len(images)} pages")
+        image = image if image is not None else (images[0] if images else None)
         parts: list[dict] = [{"text": user_text}]
         if image is not None:
             parts.append(
@@ -100,7 +106,11 @@ class OpenAiCompatibleProvider(LlmProvider):
         image: bytes | None = None,
         image_media_type: str | None = None,
         want_json: bool = False,
+        images: list[bytes] | None = None,
     ) -> str:
+        if images and len(images) > 1:
+            raise LlmProviderError(f"{self.name} takes one image per request, got {len(images)} pages")
+        image = image if image is not None else (images[0] if images else None)
         if image is not None and not self.supports_vision:
             raise LlmProviderError(f"{self.name} model {self.model!r} isn't configured for image input")
 
@@ -186,8 +196,9 @@ class OllamaProvider(LlmProvider):
         image: bytes | None = None,
         image_media_type: str | None = None,
         want_json: bool = False,
+        images: list[bytes] | None = None,
     ) -> str:
-        if image is not None:
+        if image is not None or images:
             raise LlmProviderError(f"ollama model {self.model!r} isn't configured for image input")
 
         options = {
@@ -263,13 +274,18 @@ class NovaProvider(LlmProvider):
         image: bytes | None = None,
         image_media_type: str | None = None,
         want_json: bool = False,
+        images: list[bytes] | None = None,
     ) -> str:
         content: list[dict] = [{"text": user_text}]
-        if image is not None:
-            image_format = (image_media_type or "image/png").split("/")[-1]
-            if image_format == "jpg":
-                image_format = "jpeg"
-            content.append({"image": {"format": image_format, "source": {"bytes": image}}})
+        # Bedrock's Converse API takes many image blocks in one message
+        # (verified: 40+ accepted), which is what lets a fully-scanned
+        # multi-page document go in whole rather than page 1 only.
+        page_images = images if images else ([image] if image is not None else [])
+        image_format = (image_media_type or "image/png").split("/")[-1]
+        if image_format == "jpg":
+            image_format = "jpeg"
+        for page in page_images:
+            content.append({"image": {"format": image_format, "source": {"bytes": page}}})
 
         try:
             response = self._get_client().converse(

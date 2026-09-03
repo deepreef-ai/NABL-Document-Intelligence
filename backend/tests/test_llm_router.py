@@ -21,7 +21,7 @@ class FakeProvider(LlmProvider):
         self.reply = reply
         self.calls = 0
 
-    def generate(self, system, user_text, image=None, image_media_type=None, want_json=False):
+    def generate(self, system, user_text, image=None, image_media_type=None, want_json=False, images=None):
         self.calls += 1
         outcome = self.errors[min(self.calls, len(self.errors)) - 1] if self.errors else None
         if outcome is not None:

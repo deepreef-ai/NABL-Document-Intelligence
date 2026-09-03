@@ -12,7 +12,7 @@ class FakeProvider(LlmProvider):
         self.error = error
         self.calls = 0
 
-    def generate(self, system, user_text, image=None, image_media_type=None, want_json=False):
+    def generate(self, system, user_text, image=None, image_media_type=None, want_json=False, images=None):
         self.calls += 1
         if self.error:
             raise self.error

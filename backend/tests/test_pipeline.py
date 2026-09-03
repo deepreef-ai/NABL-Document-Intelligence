@@ -1,9 +1,33 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.documents import chunking, classifier, extractor, local_ocr, pdf_utils, pipeline, retrieval, rule_extraction, verification
 from app.documents.geometry import Rect
 from app.documents.ocr_client import OcrResult
 from app.documents.pipeline import _guess_kind, process_document
+
+
+@pytest.fixture(autouse=True)
+def _no_open_extraction_by_default(monkeypatch):
+    """Every test below predates the shared unified-extraction path
+    (documents/unified_extraction.py, which sends every page's text AND its
+    image and is the same module the benchmark uses) and asserts the
+    pre-existing schema-guided behavior. Default it to a no-op so those tests
+    keep meaning what they meant, and so none of them hits a real, unmocked
+    LLM call.
+
+    Stubbed at the MODULE level rather than at pipeline._unified_field_results
+    so a test that wants to exercise it only overrides build_payload/extract
+    and still runs the real grounding/table-flattening logic around them.
+    """
+    monkeypatch.setattr(pipeline.unified_extraction, "build_payload",
+                         lambda *a, **k: pipeline.unified_extraction.DocumentPayload())
+    monkeypatch.setattr(pipeline.unified_extraction, "extract",
+                         lambda chain, payload: {"fields": {}, "tests": []})
+    # DOCX still uses the text-only chunked path.
+    monkeypatch.setattr(extractor, "extract_open_fields", lambda text: [])
+    monkeypatch.setattr(extractor, "extract_open_fields_vision", lambda image_bytes, media_type: [])
 
 
 def test_guess_kind_by_content_type_and_extension():
@@ -19,7 +43,7 @@ def test_born_digital_pdf_path_grounds_extracted_value_to_its_span(monkeypatch):
         text="GST Number: 27ABCDE1234F1Z5",
         spans=[("GST Number: 27ABCDE1234F1Z5", Rect(x=1, y=2, w=3, h=4))],
     )
-    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
     monkeypatch.setattr(
@@ -71,10 +95,10 @@ def test_supported_script_image_calls_the_ocr_client_not_vision(monkeypatch):
 def test_completed_application_form_routes_to_rag_pipeline(monkeypatch):
     monkeypatch.setattr(pipeline, "_SINGLE_CALL_MAX_CHARS", 0)  # force the per-section path
     fake_pages = [
-        SimpleNamespace(page_number=0, text="page one text", spans=[]),
-        SimpleNamespace(page_number=1, text="page two text", spans=[]),
+        SimpleNamespace(page_number=0, text="page one text, long enough to count as a real text layer", spans=[]),
+        SimpleNamespace(page_number=1, text="page two text, long enough to count as a real text layer", spans=[]),
     ]
-    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -127,10 +151,10 @@ def test_rag_pipeline_keeps_other_sections_when_one_sections_llm_chain_is_exhaus
 
     monkeypatch.setattr(pipeline, "_SINGLE_CALL_MAX_CHARS", 0)  # force the per-section path
     fake_pages = [
-        SimpleNamespace(page_number=0, text="page one text", spans=[]),
-        SimpleNamespace(page_number=1, text="page two text", spans=[]),
+        SimpleNamespace(page_number=0, text="page one text, long enough to count as a real text layer", spans=[]),
+        SimpleNamespace(page_number=1, text="page two text, long enough to count as a real text layer", spans=[]),
     ]
-    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -172,8 +196,8 @@ def test_rag_pipeline_keeps_other_sections_when_one_sections_llm_chain_is_exhaus
 
 def test_rag_pipeline_retries_only_fields_missing_a_value_not_low_confidence_ones(monkeypatch):
     monkeypatch.setattr(pipeline, "_SINGLE_CALL_MAX_CHARS", 0)  # force the per-section path (single-call skips retry)
-    fake_pages = [SimpleNamespace(page_number=0, text="page one text", spans=[])]
-    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
+    fake_pages = [SimpleNamespace(page_number=0, text="page one text, long enough to count as a real text layer", spans=[])]
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -231,7 +255,7 @@ def test_retry_pass_batches_every_missing_field_in_a_section_into_one_call(monke
     # short-document single-call fast path, which skips retry entirely.
     long_text = "page one text. " * 1000
     fake_pages = [SimpleNamespace(page_number=0, text=long_text, spans=[])]
-    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -288,8 +312,8 @@ def test_short_document_uses_a_single_extraction_call_for_every_section(monkeypa
     fits in one prompt, so it should cost exactly one extract_section_fields
     call covering every remaining field, with retrieval/indexing and the
     per-field retry pass skipped entirely (see pipeline._SINGLE_CALL_MAX_CHARS)."""
-    fake_pages = [SimpleNamespace(page_number=0, text="short page text", spans=[])]
-    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
+    fake_pages = [SimpleNamespace(page_number=0, text="short page text, long enough to count as a real text layer", spans=[])]
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -392,3 +416,114 @@ def test_english_image_falls_back_to_vision_when_bytes_arent_a_real_image(monkey
     result = process_document(b"imgbytes", "board.jpg", "image/jpeg", script="english")
 
     assert result.extraction_source == "vision_llm"
+
+
+# ------------------------------------------- shared unified-extraction path
+
+def test_doc_type_other_gets_fields_and_table_rows_via_unified_extraction(monkeypatch):
+    """The reported bug: FIELD_SETS["other"] is empty, so extract_fields
+    returns [] with no LLM call for an unrecognized document. The shared
+    unified pass is the only thing that puts anything in front of a reviewer
+    for it — and unlike the old text-only open extraction, it also returns
+    the results TABLE as structured rows."""
+    fake_page = SimpleNamespace(
+        page_number=0, text="Cane Sugar: Absent", spans=[("Cane Sugar: Absent", Rect(x=0, y=0, w=1, h=1))],
+    )
+    monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
+    monkeypatch.setattr(classifier, "classify_text", lambda text: ("other", 0.4))
+    monkeypatch.setattr(pipeline.unified_extraction, "extract", lambda chain, payload: {
+        "fields": {"cane_sugar": "Absent"},
+        "tests": [{"test_name": "Milk Fat", "result": "3.72", "unit": "%", "reference_range": "Min. 3.20"}],
+    })
+
+    result = process_document(b"%PDF-fake", "lab-report.pdf", "application/pdf", script="english")
+
+    by_field = {f.field: f.value for f in result.fields}
+    assert result.doc_type == "other"
+    assert by_field["cane_sugar"] == "Absent"
+    # flattened to compiler.py's own "attr[i]." convention
+    assert by_field["tests[0].test_name"] == "Milk Fat"
+    assert by_field["tests[0].result"] == "3.72"
+    assert by_field["tests[0].unit"] == "%"
+    assert by_field["tests[0].reference_range"] == "Min. 3.20"
+    assert {f.source for f in result.fields} == {"open_extraction"}
+
+
+def test_recognized_doc_type_keeps_schema_fields_and_gains_unified_ones(monkeypatch):
+    """A recognized doc_type keeps its schema-guided extraction (what fills a
+    named NABL form slot) AND gets the shared pass on top, so a value with no
+    schema slot is no longer discarded."""
+    fake_page = SimpleNamespace(page_number=0, text="GST Number: 27ABCDE1234F1Z5. Patient: Gunu.", spans=[])
+    monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
+    monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
+    monkeypatch.setattr(
+        extractor, "extract_fields",
+        lambda doc_type, text: [{"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}],
+    )
+    monkeypatch.setattr(pipeline.unified_extraction, "extract",
+                         lambda chain, payload: {"fields": {"patient_name": "Gunu"}, "tests": []})
+
+    result = process_document(b"%PDF-fake", "cert.pdf", "application/pdf", script="english")
+
+    by_field = {f.field: f for f in result.fields}
+    assert by_field["organisation.gst_number"].source == "llm"
+    assert by_field["patient_name"].source == "open_extraction"
+
+
+def test_unified_extraction_failure_keeps_the_schema_guided_fields(monkeypatch):
+    """Every provider rate-limited on the shared call must not discard the
+    schema-guided fields already extracted, or lose the document."""
+    fake_page = SimpleNamespace(page_number=0, text="GST Number: 27ABCDE1234F1Z5", spans=[])
+    monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
+    monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
+    monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
+    monkeypatch.setattr(extractor, "extract_fields", lambda doc_type, text: [
+        {"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}
+    ])
+    monkeypatch.setattr(pipeline.unified_extraction, "build_payload",
+                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("every provider failed")))
+
+    result = process_document(b"%PDF-fake", "cert.pdf", "application/pdf", script="english")
+
+    assert [f.field for f in result.fields] == ["organisation.gst_number"]
+    assert any("open-ended" in w for w in result.extraction_warnings)
+
+
+def test_extract_open_fields_chunked_covers_every_chunk_not_just_the_first(monkeypatch):
+    """DOCX path only (PDFs/images use unified_extraction instead).
+    extract_open_fields truncates its input to 8000 chars internally, so a
+    single un-chunked call on a long document silently never sees anything
+    past its first page or two."""
+    from app.documents.pipeline import _extract_open_fields_chunked
+
+    monkeypatch.setattr(pipeline, "_chunk_text",
+                         lambda text, chunk_size: ["chunk with alpha", "chunk with beta", "chunk with gamma"])
+    calls = []
+
+    def fake_open_fields(chunk_text):
+        calls.append(chunk_text)
+        word = chunk_text.split()[-1]
+        return [{"field": f"fact_{word}", "value": word, "confidence": 0.9}]
+
+    monkeypatch.setattr(extractor, "extract_open_fields", fake_open_fields)
+
+    result = _extract_open_fields_chunked("irrelevant - _chunk_text is mocked")
+
+    assert calls == ["chunk with alpha", "chunk with beta", "chunk with gamma"]
+    assert {f["field"] for f in result} == {"fact_alpha", "fact_beta", "fact_gamma"}
+
+
+def test_extract_open_fields_chunked_dedupes_a_field_name_repeated_across_chunks(monkeypatch):
+    from app.documents.pipeline import _extract_open_fields_chunked
+
+    monkeypatch.setattr(pipeline, "_chunk_text", lambda text, chunk_size: ["chunk one", "chunk two"])
+    monkeypatch.setattr(extractor, "extract_open_fields",
+                         lambda chunk_text: [{"field": "name", "value": f"from {chunk_text}", "confidence": 0.9}])
+
+    result = _extract_open_fields_chunked("irrelevant")
+
+    assert len(result) == 1  # first chunk wins
+    assert result[0]["value"] == "from chunk one"
+

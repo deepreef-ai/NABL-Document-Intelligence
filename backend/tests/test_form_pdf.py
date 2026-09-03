@@ -33,3 +33,18 @@ def test_render_form_pdf_handles_an_empty_table_section_gracefully():
     pdf_bytes = render_form_pdf("NABL_151", compiled)
 
     assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_render_form_pdf_renders_extra_fields_from_open_extraction():
+    # extra_fields (documents/compiler.py's routing of open-extraction
+    # fields) is a plain dict like any other flat section — no form_pdf.py
+    # changes needed for it to render; this proves that.
+    compiled = {
+        "organisation": {"laboratory_name": "Acme Test Labs"},
+        "extra_fields": {"patient_name": "Gunu", "cane_sugar": "Absent"},
+    }
+
+    pdf_bytes = render_form_pdf("NABL_151", compiled)
+
+    assert pdf_bytes.startswith(b"%PDF")
+    assert len(pdf_bytes) > 500

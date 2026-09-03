@@ -60,6 +60,10 @@ export interface DocumentOut {
   content_type: string;
   doc_type: string | null;
   extraction_source: string | null;
+  // How many pages the backend actually read and extracted from. There is no
+  // page cap any more, so this is what confirms a long scan was read end to
+  // end rather than truncated.
+  page_count: number | null;
   status: "uploaded" | "processing" | "extracted" | "failed";
   error: string | null;
   fields: ExtractedFieldOut[];

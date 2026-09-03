@@ -58,6 +58,7 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
 
     document.doc_type = result.doc_type
     document.extraction_source = result.extraction_source
+    document.page_count = result.page_count
     document.status = "extracted"
     # Non-fatal: some section/chunk of a whole-form extraction couldn't be
     # completed (e.g. every LLM provider was rate-limited at that moment)
@@ -158,6 +159,7 @@ def _serialize(document: Document) -> dict:
         "content_type": document.content_type,
         "doc_type": document.doc_type,
         "extraction_source": document.extraction_source,
+        "page_count": document.page_count,
         "status": document.status,
         "error": document.error,
         "fields": [

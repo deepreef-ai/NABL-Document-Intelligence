@@ -126,6 +126,7 @@ class LlmProvider:
         image: bytes | None = None,
         image_media_type: str | None = None,
         want_json: bool = False,
+        images: list[bytes] | None = None,
     ) -> str:
         """Return the raw text reply. Callers ask for JSON in the prompt and
         parse it themselves (see llm/json_utils.py) — a plain text-in/text-out
@@ -137,5 +138,12 @@ class LlmProvider:
         `want_json` is a per-call hint, not a provider-level constant: a plain
         chat reply (LlmChain.generate_text) must NOT force JSON mode — some
         providers (Groq/OpenAI-shaped `response_format: json_object`) reject
-        the request with a 400 if the prompt doesn't itself mention "json"."""
+        the request with a 400 if the prompt doesn't itself mention "json".
+
+        `image` is the single-image case (one scanned page, one photo);
+        `images` carries several pages of the SAME document in order, for a
+        multi-page scan. A provider that can only take one image per request
+        must RAISE for a multi-image call rather than quietly sending the
+        first page — silently dropping pages is precisely the bug this
+        parameter exists to fix. Pass one or the other, not both."""
         raise NotImplementedError

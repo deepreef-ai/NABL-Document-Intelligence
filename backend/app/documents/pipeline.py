@@ -1,11 +1,12 @@
 import logging
 import mimetypes
 
-from app.documents import classifier, extractor, local_ocr, pdf_utils
+from app.documents import classifier, extractor, local_ocr, pdf_utils, unified_extraction
 from app.documents.docx_utils import extract_text as extract_docx_text
 from app.documents.geometry import Rect
 from app.documents.grounding import FieldResult, PipelineResult, ground
 from app.documents.ocr_client import OcrClient, OcrResult, SUPPORTED_SCRIPTS
+from app.llm.factory import get_llm_chain
 
 log = logging.getLogger(__name__)
 
@@ -14,18 +15,95 @@ log = logging.getLogger(__name__)
 # extract_full_form_fields_chunked) instead of one giant single-shot prompt.
 DOCX_CHUNK_CHARS = 4000
 
-# Pages beyond this are still stored but not OCR'd/extracted from — keeps a
-# pathological 200-page upload from burning the whole request budget. Applies
-# to the per-page rasterize-and-vision path (each page is its own LLM call,
-# so the cap has to stay small).
-MAX_PAGES = 5
+# DOCX ONLY. PDFs and images go through documents/unified_extraction.py
+# instead, which sends every page's text AND its image. A DOCX has no page
+# raster to send, so it keeps this text-only path — chunked because
+# extract_open_fields truncates its input to 8000 chars internally, which on
+# a long document silently ignores everything past its first page or two.
+OPEN_EXTRACTION_CHUNK_CHARS = 7000
 
-# A born-digital PDF's text is cheap to pull out (PyMuPDF, no LLM call), and a
-# document that's actually a filled copy of the NABL application form itself
-# can legitimately run 20-30 pages — 5 pages of a real one is just the
-# amendment sheet and table of contents, not the applicant's data. Much
-# larger cap for this path only.
-MAX_TEXT_PAGES = 40
+
+# Open-ended/table extraction has no schema to validate a value against, so
+# every field it produces lands just under the review UI's
+# confidence_threshold (0.85) on purpose — a reviewer should confirm these,
+# not have them silently auto-accepted. The shared prompt (see
+# unified_extraction.SYSTEM_PROMPT) deliberately does not ask the model to
+# self-report a confidence: that number is the model's opinion of its own
+# output, and the whole point of the review step is not to take that on
+# trust.
+UNIFIED_FIELD_CONFIDENCE = 0.8
+
+
+def _unified_field_results(
+    data: bytes, suffix: str, script: str, ocr_client: OcrClient | None, ground_fn, warnings: list[str]
+) -> list[FieldResult]:
+    """Runs documents/unified_extraction.py — the same module, prompt and
+    page handling scripts/generate_predictions_and_score.py uses — and
+    converts its {fields, tests} result into FieldResults.
+
+    Table rows are flattened to "tests[i].result" etc., the same "attr[i]."
+    convention compiler.py already understands, and everything is tagged
+    source="open_extraction" so compiler.py routes it to the compiled form's
+    extra_fields bucket rather than trying to match it to a named schema
+    slot it was never meant for.
+    """
+    try:
+        payload = unified_extraction.build_payload(data, suffix, script=script, ocr_client=ocr_client)
+        result = unified_extraction.extract(get_llm_chain(), payload)
+    except Exception as exc:  # noqa: BLE001 — the schema-guided fields already
+        # extracted must survive this call failing (every provider rate-limited,
+        # an unrenderable page, ...). The document is still saved as extracted.
+        log.warning("unified extraction failed, keeping schema-guided fields only: %s", exc)
+        warnings.append(f"open-ended/table extraction unavailable: {exc}")
+        return []
+
+    warnings.extend(payload.warnings)
+
+    raw: list[dict] = [
+        {"field": key, "value": value, "confidence": UNIFIED_FIELD_CONFIDENCE}
+        for key, value in result["fields"].items()
+    ]
+    for i, row in enumerate(result["tests"]):
+        for attr in ("test_name", "result", "unit", "reference_range"):
+            if row.get(attr) is not None:
+                raw.append({"field": f"tests[{i}].{attr}", "value": row[attr], "confidence": UNIFIED_FIELD_CONFIDENCE})
+
+    return ground_fn(raw, "open_extraction")
+
+
+def _extract_open_fields_chunked(text: str) -> list[dict]:
+    seen: set[str] = set()
+    combined: list[dict] = []
+    for chunk in _chunk_text(text, OPEN_EXTRACTION_CHUNK_CHARS):
+        if not chunk.strip():
+            continue
+        for f in extractor.extract_open_fields(chunk):
+            if f["field"] in seen:
+                continue
+            seen.add(f["field"])
+            combined.append(f)
+    return combined
+
+# No page cap on either PDF path, by design. There used to be two (40 pages
+# for born-digital text, 5 for scanned) and both silently truncated real
+# documents: a 17-page report read as 5 pages still produces a confident-
+# looking result from a fraction of the input, which is worse than being
+# slow. Cost is bounded by the extraction strategy instead — text pulling is
+# free (PyMuPDF), per-page OCR is local/free, and the LLM calls are grouped
+# per schema section rather than per page (see
+# _process_completed_application_form), so page count drives OCR time but
+# NOT the number of LLM calls.
+
+# A page whose text layer yields fewer than this many characters is treated
+# as having no usable text and gets OCR'd instead. Same threshold
+# documents/chunking.py uses, so a page OCR'd here won't be re-OCR'd there.
+MIN_PAGE_TEXT_CHARS = 20
+
+
+def _image_suffix(content_type: str) -> str:
+    """unified_extraction.build_payload routes on a file extension; an upload
+    only carries a MIME type, so map one to the other."""
+    return ".jpg" if "jpeg" in (content_type or "") or "jpg" in (content_type or "") else ".png"
 
 
 def _guess_kind(filename: str, content_type: str) -> str:
@@ -71,45 +149,97 @@ def _classify_and_extract_text(
     return doc_type, doc_confidence, fields, warnings
 
 
+def _read_pdf_pages(
+    data: bytes, script: str, ocr_client: OcrClient
+) -> tuple[list[pdf_utils.PageText], str, list[str]]:
+    """EVERY page of the PDF, as text, whatever it takes to get there: a real
+    text layer where one exists, OCR of the rasterized page where it doesn't.
+
+    This is deliberately ONE path for born-digital, scanned, and mixed PDFs.
+    The scanned case used to be handled separately — rasterize each page and
+    route it through _process_image as if it were a standalone photo — which
+    meant a scanned filled-in form could never reach the whole-form
+    extraction path at all: each page got classified on its own and matched
+    against one narrow doc_type's FIELD_SETS, so a 20-page scanned
+    application form came back with a handful of certificate fields instead
+    of the form's actual sections. Getting every page to text FIRST means a
+    scanned document is extracted exactly as well as a born-digital one.
+
+    Returns (pages, extraction_source, warnings). extraction_source
+    distinguishes born_digital_pdf / ocr_pdf / mixed_pdf so the review UI can
+    show where a value actually came from.
+    """
+    pages_by_number = {p.page_number: p for p in pdf_utils.extract_text_and_boxes(data)}
+    count = pdf_utils.page_count(data)
+    pages: list[pdf_utils.PageText] = []
+    warnings: list[str] = []
+    used_text = used_ocr = False
+
+    for i in range(count):
+        page = pages_by_number.get(i)
+        if page is not None and len(page.text.strip()) >= MIN_PAGE_TEXT_CHARS:
+            pages.append(page)
+            used_text = True
+            continue
+
+        try:
+            png = pdf_utils.rasterize_page(data, i)
+            ocr = (
+                local_ocr.extract_english(png)
+                if script not in SUPPORTED_SCRIPTS
+                else ocr_client.extract(png, script)
+            )
+            pages.append(pdf_utils.PageText(
+                page_number=i, text=ocr.text, spans=list(zip(ocr.lines, ocr.boxes)),
+            ))
+            used_ocr = True
+        except Exception as exc:  # noqa: BLE001 — one unreadable page must not lose the other 19
+            log.warning("page %d could not be OCR'd, keeping it empty: %s", i, exc)
+            warnings.append(f"page {i + 1} could not be read (no text layer and OCR failed): {exc}")
+            pages.append(page or pdf_utils.PageText(page_number=i, text="", spans=[]))
+
+    source = "mixed_pdf" if (used_text and used_ocr) else ("ocr_pdf" if used_ocr else "born_digital_pdf")
+    return pages, source, warnings
+
+
 def _process_pdf(data: bytes, script: str, ocr_client: OcrClient, form_type: str, document_id: str) -> PipelineResult:
-    if pdf_utils.has_text_layer(data):
-        pages = pdf_utils.extract_text_and_boxes(data)[:MAX_TEXT_PAGES]
-        full_text = "\n".join(p.text for p in pages)
-        local_result = classifier.classify_locally(full_text, len(pages), form_type)
-        doc_type, doc_confidence = local_result or classifier.classify_text(full_text)
+    pages, source, warnings = _read_pdf_pages(data, script, ocr_client)
+    full_text = "\n".join(p.text for p in pages)
 
-        warnings: list[str] = []
-        if doc_type == "completed_application_form":
-            fields, warnings = _process_completed_application_form(data, pages, form_type, document_id)
-        else:
-            raw_fields = extractor.extract_fields(doc_type, full_text)
-            candidates: list[tuple[str, Rect, int]] = [
-                (t, r, page.page_number) for page in pages for t, r in page.spans
-            ]
-            fields = []
-            for f in raw_fields:
-                rect, page_no = None, None
-                if f["value"]:
-                    match = ground(f["value"], [(t, r) for t, r, _ in candidates])
-                    if match:
-                        rect = match
-                        page_no = next(p for t, r, p in candidates if r is match)
-                fields.append(FieldResult(f["field"], f["value"], f["confidence"], page_no, rect))
-        return PipelineResult(doc_type, doc_confidence, "born_digital_pdf", fields, warnings)
+    local_result = classifier.classify_locally(full_text, len(pages), form_type)
+    doc_type, doc_confidence = local_result or classifier.classify_text(full_text)
 
-    # Scanned PDF: rasterize each page and route it like a standalone image.
-    n_pages = min(pdf_utils.page_count(data), MAX_PAGES)
-    all_fields: list[FieldResult] = []
-    doc_type, doc_confidence, source = "other", 0.0, "vision_llm"
-    for page_no in range(n_pages):
-        png = pdf_utils.rasterize_page(data, page_no)
-        result = _process_image(png, "image/png", script, ocr_client)
-        if page_no == 0:
-            doc_type, doc_confidence, source = result.doc_type, result.doc_confidence, result.extraction_source
-        for f in result.fields:
-            f.source_page = page_no
-        all_fields.extend(result.fields)
-    return PipelineResult(doc_type, doc_confidence, source, all_fields)
+    candidates: list[tuple[str, Rect, int]] = [
+        (t, r, page.page_number) for page in pages for t, r in page.spans
+    ]
+
+    def _ground_and_wrap(raw: list[dict], field_source: str) -> list[FieldResult]:
+        wrapped = []
+        for f in raw:
+            rect, page_no = None, None
+            if f["value"]:
+                match = ground(f["value"], [(t, r) for t, r, _ in candidates])
+                if match:
+                    rect = match
+                    page_no = next(p for t, r, p in candidates if r is match)
+            wrapped.append(FieldResult(f["field"], f["value"], f["confidence"], page_no, rect, source=field_source))
+        return wrapped
+
+    if doc_type == "completed_application_form":
+        fields, extraction_warnings = _process_completed_application_form(data, pages, form_type, document_id)
+        warnings = warnings + extraction_warnings
+    else:
+        fields = _ground_and_wrap(extractor.extract_fields(doc_type, full_text), "llm")
+
+    # Open-ended extraction runs unconditionally, on top of whatever the
+    # branch above already found (including "other"/quality_manual_sop,
+    # whose FIELD_SETS are empty — this is their only source of fields).
+    # See documents/extractor.py's extract_open_fields and
+    # documents/compiler.py's routing of source="open_extraction" fields
+    # into the compiled form's extra_fields bucket.
+    fields = fields + _unified_field_results(data, ".pdf", script, ocr_client, _ground_and_wrap, warnings)
+
+    return PipelineResult(doc_type, doc_confidence, source, fields, warnings, page_count=len(pages))
 
 
 #  Below this combined character count across every page, per-section
@@ -269,23 +399,36 @@ def _process_docx(data: bytes, form_type: str) -> PipelineResult:
     # No pixel geometry for a DOCX source — the review UI falls back to a
     # page-level (whole-document) highlight for these fields.
     fields = [FieldResult(f["field"], f["value"], f["confidence"]) for f in raw_fields]
-    return PipelineResult(doc_type, doc_confidence, "docx", fields, warnings)
+    fields += [
+        FieldResult(f["field"], f["value"], f["confidence"], source="open_extraction")
+        for f in _extract_open_fields_chunked(text)
+    ]
+    return PipelineResult(doc_type, doc_confidence, "docx", fields, warnings)  # DOCX has no page geometry
 
 
-def _process_ocr_result(ocr_result: OcrResult, source: str) -> PipelineResult:
+def _process_ocr_result(
+    ocr_result: OcrResult, source: str, image_bytes: bytes, suffix: str,
+    script: str = "english", ocr_client: OcrClient | None = None,
+) -> PipelineResult:
     doc_type, doc_confidence = classifier.classify_text(ocr_result.text)
-    raw_fields = extractor.extract_fields(doc_type, ocr_result.text)
     candidates = list(zip(ocr_result.lines, ocr_result.boxes))
-    fields = []
-    for f in raw_fields:
-        rect = ground(f["value"], candidates) if f["value"] else None
-        fields.append(FieldResult(f["field"], f["value"], f["confidence"], 0 if rect else None, rect))
-    return PipelineResult(doc_type, doc_confidence, source, fields)
+
+    def _ground_and_wrap(raw: list[dict], field_source: str) -> list[FieldResult]:
+        wrapped = []
+        for f in raw:
+            rect = ground(f["value"], candidates) if f["value"] else None
+            wrapped.append(FieldResult(f["field"], f["value"], f["confidence"], 0 if rect else None, rect, source=field_source))
+        return wrapped
+
+    fields = _ground_and_wrap(extractor.extract_fields(doc_type, ocr_result.text), "llm")
+    warnings: list[str] = []
+    fields += _unified_field_results(image_bytes, suffix, script, ocr_client, _ground_and_wrap, warnings)
+    return PipelineResult(doc_type, doc_confidence, source, fields, warnings, page_count=1)
 
 
 def _process_image(data: bytes, content_type: str, script: str, ocr_client: OcrClient) -> PipelineResult:
     if script in SUPPORTED_SCRIPTS:
-        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}")
+        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}", data, _image_suffix(content_type), script, ocr_client)
 
     if script == "english":
         # Local RapidOCR (the same engine deepreef-ocr's Lambda runs, using
@@ -295,7 +438,7 @@ def _process_image(data: bytes, content_type: str, script: str, ocr_client: OcrC
         # this script. Only falls through to the vision LLM below if it
         # itself isn't usable (not installed, corrupt image, etc.).
         try:
-            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english")
+            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english", data, _image_suffix(content_type), script, ocr_client)
         except local_ocr.LocalOcrError:
             pass
 
@@ -307,4 +450,10 @@ def _process_image(data: bytes, content_type: str, script: str, ocr_client: OcrC
     doc_type, doc_confidence = classifier.classify_image(data, media_type)
     raw_fields = extractor.extract_fields_vision(doc_type, data, media_type)
     fields = [FieldResult(f["field"], f["value"], f["confidence"]) for f in raw_fields]
-    return PipelineResult(doc_type, doc_confidence, "vision_llm", fields)
+    warnings: list[str] = []
+    fields += _unified_field_results(
+        data, _image_suffix(media_type), script, ocr_client, lambda raw, src: [
+            FieldResult(f["field"], f["value"], f["confidence"], source=src) for f in raw
+        ], warnings,
+    )
+    return PipelineResult(doc_type, doc_confidence, "vision_llm", fields, warnings, page_count=1)

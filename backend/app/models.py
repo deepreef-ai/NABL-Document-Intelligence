@@ -43,6 +43,10 @@ class Document(Base):
     # populated by the classifier once the pipeline runs
     doc_type: Mapped[str | None] = mapped_column(String, nullable=True)
     extraction_source: Mapped[str | None] = mapped_column(String, nullable=True)
+    # How many pages were actually read/extracted — there is no page cap
+    # any more (see documents/pipeline.py), so this is how the review UI
+    # can show whether a 17-page scan really was read end to end.
+    page_count: Mapped[int | None] = mapped_column(nullable=True)
     # "uploaded" -> "processing" -> "extracted" -> "failed"
     status: Mapped[str] = mapped_column(String, default="uploaded")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

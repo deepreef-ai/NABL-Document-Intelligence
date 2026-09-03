@@ -6,14 +6,20 @@ same document fresh, cache the result to predictions/<name>.json (resumable:
 already-cached documents are skipped unless --force), then score every
 cached prediction against its ground truth and write one summary.
 
-No separate "normalize" stage or cached text folder: text/image extraction
-happens per-document, in-process, using app/documents/pdf_utils.py directly
-(pure PyMuPDF, no OCR dependency) — a born-digital page's real text is sent
-as text; a page with no text layer (scanned PDF or a raw image file) is
-rasterized and sent to the model as an image instead of running local OCR
-first. Nova is multimodal, so this hands it the actual page rather than a
-possibly-degraded OCR transcription, and it means this script never depends
-on the deepreef-ocr sibling checkout at all.
+No separate "normalize" stage or cached text folder: extraction happens
+per-document, in-process, through app/documents/unified_extraction.py — the
+SAME module, prompt and page handling the live upload pipeline
+(documents/pipeline.py) uses, so these metrics describe the product rather
+than a benchmark-only code path. Every page contributes BOTH text (PyMuPDF's
+text layer where there is one, OCR where there isn't) and an image, so the
+model can cross-check the transcription against the page itself.
+
+The one thing deliberately NOT shared with the live app is the provider
+chain: this script runs Nova alone (no fallback), because its job is to
+measure one model, while the app runs the full fallback chain because its
+job is to answer the request. Because OCR is now part of the shared path,
+this script does depend on a working OCR backend (local RapidOCR for
+English) — a page whose OCR fails is still sent as an image, with a warning.
 
 Usage:
     python scripts/generate_predictions_and_score.py
@@ -33,28 +39,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from app.benchmark.accumulator import MetricAccumulator  # noqa: E402
 from app.benchmark.compare import compare_fields, compare_tests  # noqa: E402
 from app.config import get_settings  # noqa: E402
-from app.documents import pdf_utils  # noqa: E402
+from app.documents import unified_extraction  # noqa: E402
 from app.llm.chain import LlmChain  # noqa: E402
 from app.llm.providers import NovaProvider  # noqa: E402
 
 DEFAULT_ROOT = r"G:\Shared drives\Product & Engineering\Projects\NABL Document Intelligence"
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
-_SYSTEM_PROMPT = (
-    "You are an information-extraction system for laboratory/testing reports "
-    "(milk, food, chemical, medical, and similar documents). Extract EVERY "
-    "key-value pair actually present in the document — never invent, guess, "
-    "or infer a value that isn't really there; if unsure, leave it out.\n\n"
-    "Respond with ONLY a JSON object of this exact shape:\n"
-    '{"fields": {"<snake_case_key>": "<value exactly as written>", ...}, '
-    '"tests": [{"test_name": "<name>", "result": "<value as written>", '
-    '"unit": "<unit or null>", "reference_range": "<range or null>"}, ...]}\n\n'
-    '"fields" holds every header/metadata value (names, dates, addresses, '
-    "report numbers, sample details, etc.) using natural snake_case keys "
-    'derived from the document\'s own labels. "tests" holds every row of a '
-    "results table. Use an empty list for \"tests\" if the document has no "
-    "tabular results."
-)
 
 
 def _find_source_file(dataset_dir: Path, filename: str) -> Path | None:
@@ -62,53 +52,16 @@ def _find_source_file(dataset_dir: Path, filename: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _build_message_content(source_path: Path) -> tuple[list[dict], bytes | None, str | None]:
-    """Returns (text_content_blocks, single_image_bytes, media_type) — Nova's
-    content list mixes text and image blocks freely, so a page with a real
-    text layer contributes text, one without contributes its rasterized
-    image, in document order."""
-    suffix = source_path.suffix.lower()
-    data = source_path.read_bytes()
-
-    if suffix in IMAGE_EXTENSIONS:
-        media_type = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
-        return [], data, media_type
-
-    if suffix != ".pdf":
-        raise ValueError(f"unsupported file type: {suffix}")
-
-    pages = pdf_utils.extract_text_and_boxes(data)
-    count = pdf_utils.page_count(data)
-    text_blocks: list[dict] = []
-    image_bytes: bytes | None = None
-    for i in range(count):
-        page = next((p for p in pages if p.page_number == i), None)
-        text = page.text if page else ""
-        if len(text.strip()) >= 20:
-            text_blocks.append({"text": f"--- Page {i + 1} ---\n{text}"})
-        else:
-            # No usable text layer on this page — rasterize and attach as an
-            # image instead of running local OCR. Bedrock's Converse API
-            # accepts multiple image blocks in one message; kept simple here
-            # by taking only the first such page per document (a document
-            # mixing several image-only pages is rare in this dataset and
-            # multi-image requests cost more without much extra signal).
-            if image_bytes is None:
-                image_bytes = pdf_utils.rasterize_page(data, i)
-    return text_blocks, image_bytes, "image/png" if image_bytes else None
-
-
 def _predict_one(chain: LlmChain, source_path: Path) -> dict:
-    text_blocks, image_bytes, media_type = _build_message_content(source_path)
-    user_text = "\n\n".join(b["text"] for b in text_blocks) if text_blocks else (
-        "(This document has no extractable text layer — read the attached image.)"
+    """Delegates to documents/unified_extraction.py — the SAME prompt, page
+    handling and output shape the live upload pipeline uses, which is what
+    makes these metrics describe the product rather than a benchmark-only
+    code path."""
+    payload = unified_extraction.build_payload(
+        source_path.read_bytes(), source_path.suffix, script="english",
     )
-    result = chain.generate_json(_SYSTEM_PROMPT, user_text, image=image_bytes, image_media_type=media_type)
-    return {
-        "fields": result.get("fields", {}) if isinstance(result, dict) else {},
-        "tests": result.get("tests", []) if isinstance(result, dict) else [],
-        "pipeline_error": None,
-    }
+    result = unified_extraction.extract(chain, payload)
+    return {"fields": result["fields"], "tests": result["tests"], "pipeline_error": None}
 
 
 def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir: Path, chain: LlmChain, force: bool = False) -> dict:

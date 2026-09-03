@@ -90,6 +90,13 @@ class BaseNablForm(BaseModel):
     authorized_signatories: list[AuthorizedSignatoryRecord] = Field(default_factory=list)
     scope: list[ScopeStatement] = Field(default_factory=list)
     pt_ilc: list[PTILCRecord] = Field(default_factory=list)
+    # Open-ended extraction (documents/extractor.py's extract_open_fields*)
+    # finds key/value pairs with no fixed schema slot — every doc_type, not
+    # just unrecognized ones — and documents/compiler.py routes them here by
+    # their own invented field name rather than dropping them. Keyed by
+    # field name, not field_path, since these never had a dotted schema path
+    # to begin with.
+    extra_fields: dict[str, str] = Field(default_factory=dict)
 
 
 class Nabl151Form(BaseNablForm):
@@ -158,6 +165,8 @@ class BaseRecognitionForm(BaseModel):
     scope: list[RecognitionScopeItem] = Field(default_factory=list)
     equipment: list[RecognitionEquipmentRecord] = Field(default_factory=list)
     pt_participation: list[RecognitionPTRecord] = Field(default_factory=list)
+    # See BaseNablForm.extra_fields — same role, for the recognition-scheme forms.
+    extra_fields: dict[str, str] = Field(default_factory=dict)
 
 
 class Nabl155Form(BaseRecognitionForm):

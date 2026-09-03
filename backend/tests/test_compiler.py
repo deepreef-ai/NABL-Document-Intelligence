@@ -6,8 +6,8 @@ from app.documents.compiler import compile_form
 from app.schemas.forms import FORM_MODEL, NablFormType
 
 
-def _field(field_path, value, accepted=True):
-    return SimpleNamespace(field_path=field_path, value=value, accepted=accepted)
+def _field(field_path, value, accepted=True, source="llm"):
+    return SimpleNamespace(field_path=field_path, value=value, accepted=accepted, source=source)
 
 
 def _doc(doc_type, fields):
@@ -95,3 +95,54 @@ def test_completed_application_form_populates_multiple_sections_from_one_documen
     assert result["equipment"][0]["serial_number"] == "SN-001"
     assert result["staff"][0]["name"] == "Jane Doe"
     assert result["staff"][0]["designation"] == "Quality Manager"
+
+
+def test_open_extraction_fields_land_in_extra_fields_not_a_schema_attribute():
+    docs = [
+        _doc(
+            "legal_proof",
+            [
+                _field("organisation.gst_number", "27ABCDE1234F1Z5"),  # normal schema field
+                _field("patient_name", "Gunu", source="open_extraction"),  # no schema slot anywhere
+            ],
+        )
+    ]
+
+    result = compile_form(NablFormType.NABL_151.value, docs)
+
+    assert result["organisation"]["gst_number"] == "27ABCDE1234F1Z5"
+    assert result["extra_fields"] == {"patient_name": "Gunu"}
+    # never injected as a real attribute anywhere on the compiled form
+    assert "patient_name" not in result
+    assert "patient_name" not in result["organisation"]
+
+
+def test_open_extraction_field_cannot_overwrite_a_real_schema_attribute():
+    # "gst_number" is the last dotted segment of a real schema field. An
+    # open-extraction field with that same bare name must NOT be able to
+    # reach _merge_flat_fields' hasattr/setattr path and overwrite it.
+    docs = [
+        _doc(
+            "legal_proof",
+            [
+                _field("organisation.gst_number", "27ABCDE1234F1Z5"),
+                _field("gst_number", "FORGED-VALUE", source="open_extraction"),
+            ],
+        )
+    ]
+
+    result = compile_form(NablFormType.NABL_151.value, docs)
+
+    assert result["organisation"]["gst_number"] == "27ABCDE1234F1Z5"
+    assert result["extra_fields"] == {"gst_number": "FORGED-VALUE"}
+
+
+def test_document_with_only_open_extraction_fields_still_populates_extra_fields():
+    # e.g. a doc_type of "other" — no schema-guided fields at all, only
+    # open-extraction ones. Must not be silently dropped, and must not
+    # break the existing doc_type dispatch for a target-less doc_type.
+    docs = [_doc("other", [_field("cane_sugar", "Absent", source="open_extraction")])]
+
+    result = compile_form(NablFormType.NABL_151.value, docs)
+
+    assert result["extra_fields"] == {"cane_sugar": "Absent"}

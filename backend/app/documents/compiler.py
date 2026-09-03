@@ -64,6 +64,22 @@ def compile_form(
             continue
         all_fields_seen.extend(fields)
 
+        # Open-ended fields (documents/extractor.py's extract_open_fields*)
+        # never had a known schema slot to begin with — route them straight
+        # into extra_fields by their own invented name, bypassing
+        # LIST_TARGET/FLAT_MERGE_TARGETS entirely so they can never collide
+        # with (overwrite) a real schema attribute via _merge_flat_fields'
+        # hasattr/setattr below. A document whose only fields are open ones
+        # (e.g. doc_type "other") still contributes them here even though it
+        # then hits the same no-op dispatch below as it always has.
+        open_fields = [f for f in fields if getattr(f, "source", "llm") == "open_extraction"]
+        for f in open_fields:
+            if _is_meaningful(f.value):
+                form.extra_fields[f.field_path] = f.value
+        fields = [f for f in fields if f not in open_fields]
+        if not fields:
+            continue
+
         if doc.doc_type == "completed_application_form":
             _merge_full_form_fields(form, fields, report)
             continue

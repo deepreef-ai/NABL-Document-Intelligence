@@ -4,7 +4,12 @@ import type { ExtractedFieldOut } from "../api/client";
 interface Props {
   field: ExtractedFieldOut;
   threshold: number;
-  sourceLabel?: string;
+  // Jumps the document viewer to the page this value was read from. The
+  // caption used to repeat the source FILENAME under every field, which at
+  // 200+ fields is the same string 200+ times — and the panel header already
+  // names the document. The page it came from is both non-redundant and
+  // actionable, so it earns the space instead.
+  onJumpToPage?: () => void;
   onSave: (value: string) => Promise<void>;
   onAccept: () => Promise<void>;
   onFocus: () => void;
@@ -19,7 +24,7 @@ function prettifyLabel(fieldPath: string): string {
     .join(" ");
 }
 
-export default function FormField({ field, threshold, sourceLabel, onSave, onAccept, onFocus, isFocused }: Props) {
+export default function FormField({ field, threshold, onJumpToPage, onSave, onAccept, onFocus, isFocused }: Props) {
   const [value, setValue] = useState(field.value ?? "");
   const [saving, setSaving] = useState(false);
   const [justFilled, setJustFilled] = useState(false);
@@ -88,7 +93,14 @@ export default function FormField({ field, threshold, sourceLabel, onSave, onAcc
 
       <div className="form-field-caption">
         <span>
-          {sourceLabel && !isEmpty ? `from ${sourceLabel} · ` : ""}
+          {field.source_page !== null && !isEmpty && (
+            <>
+              <button className="field-page-link" onClick={onJumpToPage} title={`Go to page ${field.source_page + 1}`}>
+                p{field.source_page + 1}
+              </button>
+              {" · "}
+            </>
+          )}
           <span className={confidenceClass}>{Math.round(field.confidence * 100)}%</span>
         </span>
         <button className={field.accepted ? "accepted" : ""} onClick={onAccept} title="Confirm this value">

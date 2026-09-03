@@ -119,14 +119,15 @@ class LlmChain:
         return usable, skip_notes
 
     def generate_text(
-        self, system: str, user_text: str, image: bytes | None = None, image_media_type: str | None = None
+        self, system: str, user_text: str, image: bytes | None = None, image_media_type: str | None = None,
+        images: list[bytes] | None = None,
     ) -> str:
         if not self.providers:
             raise LlmNotConfigured(_NOT_CONFIGURED_MESSAGE)
         usable, errors = self._usable_providers()
         for provider in usable:
             try:
-                result = provider.generate(system, user_text, image, image_media_type)
+                result = provider.generate(system, user_text, image, image_media_type, images=images)
             except Exception as exc:  # noqa: BLE001 - any failure falls through to the next provider
                 self._record_failure(provider, exc, time.monotonic())
                 errors.append(f"{provider.name}: {exc}")
@@ -136,14 +137,15 @@ class LlmChain:
         raise LlmProviderError("every configured LLM provider failed: " + " | ".join(errors))
 
     def generate_json(
-        self, system: str, user_text: str, image: bytes | None = None, image_media_type: str | None = None
+        self, system: str, user_text: str, image: bytes | None = None, image_media_type: str | None = None,
+        images: list[bytes] | None = None,
     ) -> dict:
         if not self.providers:
             raise LlmNotConfigured(_NOT_CONFIGURED_MESSAGE)
         usable, errors = self._usable_providers()
         for provider in usable:
             try:
-                raw = provider.generate(system, user_text, image, image_media_type, want_json=True)
+                raw = provider.generate(system, user_text, image, image_media_type, want_json=True, images=images)
                 result = parse_json_object(raw)
             except Exception as exc:  # noqa: BLE001
                 self._record_failure(provider, exc, time.monotonic())

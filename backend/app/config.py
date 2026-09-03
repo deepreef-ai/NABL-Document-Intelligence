@@ -149,6 +149,14 @@ class Settings(BaseSettings):
     qdrant_storage_dir: str = "./qdrant_storage"
     retrieval_top_k: int = 4
 
+    # DPI for the page images documents/unified_extraction.py sends alongside
+    # each page's text. MEASURED 2026-09-03: at 150 DPI one page of this
+    # dataset renders to ~762 KB, so the 17-page document alone is ~12.7 MB
+    # of images before base64 inflation — close enough to Bedrock's request
+    # ceiling to be the thing that breaks first on a longer document. 110
+    # roughly halves that and keeps form text legible.
+    page_image_dpi: int = 110
+
     database_url: str = "sqlite:///./nabl.db"
     storage_dir: str = "./storage"
 
