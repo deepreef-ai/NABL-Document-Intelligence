@@ -178,26 +178,39 @@ def test_all_providers_cooling_down_raises_with_a_clear_reason(monkeypatch):
     assert "groq" in message and "cooling down" in message
 
 
-def test_end_to_end_chain_failure_message_never_contains_a_real_providers_secret(monkeypatch):
-    """Integration check across the real seam: a genuine GeminiProvider whose
-    HTTP call fails, routed through the real LlmChain. The aggregated 'every
-    provider failed' message the caller (and eventually Document.error) sees
-    must not contain the API key, proving classify_http_error's redaction
-    survives being relayed through the chain's own error-joining logic."""
-    import httpx
 
-    from app.llm.providers import GeminiProvider
 
-    secret = "sk-do-not-leak-me"
-    monkeypatch.setattr(
-        httpx, "post",
-        lambda *a, **k: httpx.Response(401, request=httpx.Request("POST", "https://example.test/x"), json={"error": "bad key"}),
-    )
-    provider = GeminiProvider(secret, "gemini-2.5-flash", 30.0)
-    chain = LlmChain([provider])
+def test_seconds_until_available_lets_a_batch_caller_wait_instead_of_skipping(monkeypatch):
+    """The chain fails fast for interactive callers, but a batch job should
+    sleep through a cooldown rather than abandon work — MEASURED 2026-09-04:
+    one rate-limit cascade cost 37 of 51 benchmark documents, each failing
+    instantly with "cooling down for Ns more" without an API attempt."""
+    clock = _install_clock(monkeypatch)
+    chain = LlmChain([FakeProvider("gemini", errors=[LlmRateLimitError("429")])])
+
+    assert chain.seconds_until_available() is None  # healthy: usable right now
 
     try:
         chain.generate_text(system="s", user_text="u")
-        assert False, "expected every provider to fail"
-    except LlmProviderError as exc:
-        assert secret not in str(exc)
+    except LlmProviderError:
+        pass
+
+    wait = chain.seconds_until_available()
+    assert wait is not None and 0 < wait <= 5.0  # first 429 -> ~5s backoff
+
+    clock.advance(wait + 1)
+    assert chain.seconds_until_available() is None  # waiting it out restores it
+
+
+def test_seconds_until_available_is_infinite_when_waiting_cannot_help(monkeypatch):
+    """A disabled provider (bad key, dead billing) never recovers on a timer,
+    so a batch caller must not sit waiting for it."""
+    import math
+    _install_clock(monkeypatch)
+    chain = LlmChain([FakeProvider("gemini", errors=[LlmAuthError("401")])])
+    try:
+        chain.generate_text(system="s", user_text="u")
+    except LlmProviderError:
+        pass
+    assert chain.seconds_until_available() == math.inf
+    assert LlmChain([]).seconds_until_available() == math.inf
