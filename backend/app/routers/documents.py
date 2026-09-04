@@ -7,7 +7,6 @@ from app.db import get_db
 from app.documents import pdf_utils
 from app.documents.pipeline import process_document
 from app.documents.storage import LocalFileStorage
-from app.llm.base import redact_known_secrets
 from app.models import Application, Document, ExtractedField
 
 router = APIRouter(tags=["documents"])
@@ -46,12 +45,7 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
         )
     except Exception as exc:  # noqa: BLE001 — surface as a failed document, not a 500
         document.status = "failed"
-        # redact_known_secrets is defense-in-depth: every LLM provider already
-        # scrubs its own API key out of an error at the point of failure (see
-        # llm/base.py's classify_http_error), but this is the one place any
-        # exception in the whole pipeline ends up stored and returned straight
-        # to the frontend, so it gets a second, independent pass.
-        document.error = redact_known_secrets(str(exc))
+        document.error = str(exc)
         db.add(document)
         db.commit()
         return
@@ -64,7 +58,7 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
     # while the rest succeeded — see documents/pipeline.py's
     # extraction_warnings. The document is still "extracted" with whatever
     # DID come back, but the gap is recorded rather than silently hidden.
-    document.error = redact_known_secrets("; ".join(result.extraction_warnings)) or None
+    document.error = "; ".join(result.extraction_warnings) or None
 
     db.query(ExtractedField).filter(ExtractedField.document_id == document.id).delete()
     for f in result.fields:

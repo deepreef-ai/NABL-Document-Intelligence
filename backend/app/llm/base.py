@@ -1,6 +1,3 @@
-import httpx
-
-
 class LlmProviderError(RuntimeError):
     """This one provider failed to answer — the chain should try the next one."""
 
@@ -38,66 +35,12 @@ class LlmTimeoutError(LlmProviderError):
     """The provider didn't respond within the configured timeout."""
 
 
-_REDACTED = "[REDACTED]"
-
-
-def redact(text: str, *secrets: str) -> str:
-    """Strip any of `secrets` (e.g. an API key) out of `text` before it can
-    reach a log line, a stored Document.error, or a frontend-visible error
-    message. Silently skips falsy secrets (an unset key) rather than erroring."""
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, _REDACTED)
-    return text
-
-
-def redact_known_secrets(text: str) -> str:
-    """Last-resort safety net: scrub every currently configured provider API
-    key out of `text`. Each provider already redacts its own key at the exact
-    point of failure (see classify_http_error below) — this exists for
-    anywhere else an exception's str() might end up in front of a user (e.g.
-    Document.error) without having to thread every provider's key through by
-    hand. Local import to avoid a module-load-order dependency on app.config."""
-    from app.config import get_settings
-
-    settings = get_settings()
-    secrets = (
-        settings.gemini_api_key,
-        settings.groq_api_key,
-        settings.huggingface_api_key,
-        settings.cerebras_api_key,
-        settings.openrouter_api_key,
-    )
-    return redact(text, *secrets)
-
-
-def classify_http_error(name: str, exc: httpx.HTTPError, *secrets: str) -> LlmProviderError:
-    """Turn an httpx exception into the right typed LlmProviderError subclass
-    based on its HTTP status code (if any), with every given secret scrubbed
-    out of the message first. Shared by every provider in llm/providers.py so
-    the status-code-to-behavior mapping lives in exactly one place."""
-    message = redact(str(exc), *secrets)
-    if isinstance(exc, httpx.TimeoutException):
-        return LlmTimeoutError(f"{name} timed out: {message}")
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        if status == 429:
-            return LlmRateLimitError(f"{name} rate-limited (429): {message}")
-        if status == 402:
-            return LlmQuotaError(f"{name} billing/quota error (402): {message}")
-        if status in (401, 403):
-            return LlmAuthError(f"{name} auth error ({status}): {message}")
-        if status == 400:
-            return LlmBadRequestError(f"{name} bad request (400): {message}")
-    return LlmProviderError(f"{name} call failed: {message}")
-
-
 def classify_boto_error(name: str, exc: Exception) -> LlmProviderError:
-    """Bedrock's equivalent of classify_http_error above — boto3/botocore
-    raise a ClientError carrying an AWS error CODE rather than an HTTP
-    status, so the mapping is code-based instead. No secrets to redact here:
-    Nova (see providers.py's NovaProvider) authenticates via the ambient AWS
-    credential chain, never a key embedded in the request or its error text."""
+    """Bedrock/botocore raise a ClientError carrying an AWS error CODE rather
+    than an HTTP status, so the mapping is code-based. No secrets to redact
+    here: Nova (see providers.py's NovaProvider) authenticates via the
+    ambient AWS credential chain, never a key embedded in the request or its
+    error text."""
     from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
 
     message = str(exc)
@@ -116,6 +59,32 @@ def classify_boto_error(name: str, exc: Exception) -> LlmProviderError:
     return LlmProviderError(f"{name} call failed: {message}")
 
 
+def classify_http_error(name: str, status: int, body: str) -> LlmProviderError:
+    """Same mapping as classify_boto_error, for a REST provider. `body` is the
+    server's response text — it is included because a 400 from these APIs
+    usually explains what about the request was rejected, which is otherwise
+    invisible. The caller MUST NOT pass anything containing the API key: keyed
+    providers put the key in the query string or a header, so build error text
+    from the status and body only, never from the request URL."""
+    if status == 429:
+        return LlmRateLimitError(f"{name} rate-limited (429): {body}")
+    if status in (401, 403):
+        return LlmAuthError(f"{name} auth error ({status}): {body}")
+    if status == 402:
+        return LlmQuotaError(f"{name} quota/billing error (402): {body}")
+    if status == 400:
+        return LlmBadRequestError(f"{name} bad request (400): {body}")
+    if status in (408, 504):
+        return LlmTimeoutError(f"{name} timed out ({status}): {body}")
+    if status in (503, 529):
+        # "This model is currently experiencing high demand" — transient
+        # capacity, not a broken request. Same treatment as a 429 so the
+        # router backs off and a later document in the same batch can
+        # succeed, instead of the whole run dying on a passing spike.
+        return LlmRateLimitError(f"{name} temporarily unavailable ({status}): {body}")
+    return LlmProviderError(f"{name} call failed ({status}): {body}")
+
+
 class LlmProvider:
     name: str
 
@@ -129,13 +98,9 @@ class LlmProvider:
     ) -> str:
         """Return the raw text reply. Callers ask for JSON in the prompt and
         parse it themselves (see llm/json_utils.py) — a plain text-in/text-out
-        contract is the one thing every provider (Gemini, Groq, HF router,
-        anything OpenAI-chat-shaped) can do the same way, which is what makes
-        a fallback chain across them possible without per-provider branching
-        at every call site.
+        contract that would let a future second provider join the chain
+        without per-provider branching at any call site.
 
         `want_json` is a per-call hint, not a provider-level constant: a plain
-        chat reply (LlmChain.generate_text) must NOT force JSON mode — some
-        providers (Groq/OpenAI-shaped `response_format: json_object`) reject
-        the request with a 400 if the prompt doesn't itself mention "json"."""
+        chat reply (LlmChain.generate_text) must NOT force JSON mode."""
         raise NotImplementedError

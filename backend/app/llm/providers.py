@@ -1,228 +1,27 @@
 import base64
-import os
+import time
 
 import boto3
 import httpx
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
-from app.llm.base import LlmProvider, LlmProviderError, classify_boto_error, classify_http_error
-
-
-class GeminiProvider(LlmProvider):
-    """Google AI Studio's free-tier Gemini API. Chosen as the default first
-    link in the chain because it's the one free provider that reliably does
-    both function-calling-grade structured JSON *and* image input in the same
-    call — needed for the English-scan vision fallback (see documents/pipeline.py)."""
-
-    def __init__(self, api_key: str, model: str, timeout: float, name: str = "gemini"):
-        # `name` is settable (not just the "gemini" class default) so that a
-        # second/third Gemini key registered under "gemini_2"/"gemini_3" (see
-        # llm/factory.py) gets its own identity in llm/chain.py's per-provider
-        # cooldown map — otherwise two GeminiProvider instances would both
-        # report as "gemini" and silently share one cooldown entry, so a 429
-        # on key 1 would incorrectly cool down key 2 as well, defeating the
-        # entire point of having a second key.
-        self.name = name
-        self.api_key = api_key
-        self.model = model
-        self.timeout = timeout
-
-    def generate(
-        self,
-        system: str,
-        user_text: str,
-        image: bytes | None = None,
-        image_media_type: str | None = None,
-        want_json: bool = False,
-    ) -> str:
-        parts: list[dict] = [{"text": user_text}]
-        if image is not None:
-            parts.append(
-                {"inline_data": {"mime_type": image_media_type or "image/png", "data": base64.b64encode(image).decode("ascii")}}
-            )
-        generation_config = {"temperature": 0.2}
-        if want_json:
-            generation_config["responseMimeType"] = "application/json"
-        payload = {
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": generation_config,
-        }
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
-        try:
-            # The key goes in a header, not the `?key=` query param the REST
-            # docs lead with — a query param lands in request URLs that show
-            # up verbatim in httpx's own exception messages (and in most HTTP
-            # client/proxy logs), so this keeps the key out of that surface
-            # entirely rather than relying only on redacting it after the fact.
-            resp = httpx.post(
-                url, headers={"x-goog-api-key": self.api_key}, json=payload, timeout=self.timeout
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise classify_http_error("gemini", exc, self.api_key) from exc
-
-        data = resp.json()
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError) as exc:
-            raise LlmProviderError(f"gemini returned an unexpected response shape: {data}") from exc
-
-
-class OpenAiCompatibleProvider(LlmProvider):
-    """Groq and the Hugging Face router both speak the OpenAI chat-completions
-    shape, so one implementation covers both — only the base URL, auth, and
-    per-provider quirks (vision support, JSON mode support) differ."""
-
-    def __init__(
-        self,
-        name: str,
-        base_url: str,
-        api_key: str,
-        model: str,
-        timeout: float,
-        supports_vision: bool = False,
-        supports_json_mode: bool = True,
-    ):
-        self.name = name
-        self.base_url = base_url
-        self.api_key = api_key
-        self.model = model
-        self.timeout = timeout
-        self.supports_vision = supports_vision
-        self.supports_json_mode = supports_json_mode
-
-    def generate(
-        self,
-        system: str,
-        user_text: str,
-        image: bytes | None = None,
-        image_media_type: str | None = None,
-        want_json: bool = False,
-    ) -> str:
-        if image is not None and not self.supports_vision:
-            raise LlmProviderError(f"{self.name} model {self.model!r} isn't configured for image input")
-
-        if image is not None:
-            user_content: object = [
-                {"type": "text", "text": user_text},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{image_media_type or 'image/png'};base64,{base64.b64encode(image).decode('ascii')}"
-                    },
-                },
-            ]
-        else:
-            user_content = user_text
-
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_content}],
-            "temperature": 0.2,
-        }
-        if want_json and self.supports_json_mode:
-            payload["response_format"] = {"type": "json_object"}
-
-        try:
-            resp = httpx.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise classify_http_error(self.name, exc, self.api_key) from exc
-
-        data = resp.json()
-        try:
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
-            raise LlmProviderError(f"{self.name} returned an unexpected response shape: {data}") from exc
-
-
-class OllamaProvider(LlmProvider):
-    """Local model served by Ollama (https://ollama.com) — no API key, no
-    rate limit, no hard request-size cap the way Groq/HF's gateways have.
-    Text-only here (small local models like Qwen aren't wired for image
-    input in this app); bounded by this machine's RAM and the model's context
-    window rather than anything network-side, which is why `num_ctx` is set
-    explicitly — Ollama's own default is far smaller than a document-
-    extraction chunk needs.
-
-    `num_thread=0` means "use every logical core" (resolved at call time via
-    os.cpu_count(), not baked in at construction, in case the process ever
-    moves to different hardware). `num_predict` is a generous output-length
-    ceiling — see config.py's ollama_num_predict for why it's a safety net,
-    not a normal-case constraint: the real lever for a slow local model is
-    keeping the PROMPT asking for a short answer in the first place (see
-    documents/extractor.py's extract_section_fields), not capping tokens
-    after the fact and risking a truncated real answer."""
-
-    name = "ollama"
-
-    def __init__(
-        self,
-        base_url: str,
-        model: str,
-        timeout: float,
-        num_ctx: int = 8192,
-        num_thread: int = 0,
-        num_predict: int = 1024,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.timeout = timeout
-        self.num_ctx = num_ctx
-        self.num_thread = num_thread
-        self.num_predict = num_predict
-
-    def generate(
-        self,
-        system: str,
-        user_text: str,
-        image: bytes | None = None,
-        image_media_type: str | None = None,
-        want_json: bool = False,
-    ) -> str:
-        if image is not None:
-            raise LlmProviderError(f"ollama model {self.model!r} isn't configured for image input")
-
-        options = {
-            "num_ctx": self.num_ctx,
-            "num_thread": self.num_thread or (os.cpu_count() or 4),
-            "num_predict": self.num_predict,
-        }
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_text}],
-            "stream": False,
-            "options": options,
-        }
-        if want_json:
-            payload["format"] = "json"
-
-        try:
-            resp = httpx.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise classify_http_error("ollama", exc) from exc
-
-        data = resp.json()
-        try:
-            return data["message"]["content"]
-        except KeyError as exc:
-            raise LlmProviderError(f"ollama returned an unexpected response shape: {data}") from exc
+from app.llm.base import (
+    LlmProvider,
+    LlmProviderError,
+    LlmRateLimitError,
+    LlmTimeoutError,
+    classify_boto_error,
+    classify_http_error,
+)
 
 
 class NovaProvider(LlmProvider):
-    """Amazon Nova on AWS Bedrock, via the Converse API — boto3, not httpx,
-    so it doesn't share classify_http_error's status-code mapping (see
-    classify_boto_error in base.py instead). Authenticates via the ambient
-    AWS credential chain (same one documents/ocr_client.py already relies
-    on for the OCR Lambda) — no separate API key setting.
+    """Amazon Nova on AWS Bedrock, via the Converse API — boto3, not httpx.
+    Authenticates via the ambient AWS credential chain (same one
+    documents/ocr_client.py already relies on for the OCR Lambda) — no
+    separate API key setting. The only LLM provider in this app: see
+    config.py's llm_provider_order/chunked_extraction_provider_order.
 
     `model` MUST be a region-prefixed inference-profile ID (e.g.
     "us.amazon.nova-2-lite-v1:0"), not the bare model ID
@@ -286,3 +85,121 @@ class NovaProvider(LlmProvider):
             return "".join(part.get("text", "") for part in parts)
         except (KeyError, IndexError) as exc:
             raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response}") from exc
+
+
+class GeminiProvider(LlmProvider):
+    """Google Gemini via the REST API (httpx, already a dependency — no
+    google-generativeai SDK needed for one endpoint).
+
+    Added as a SECOND provider so the accuracy benchmark can keep running when
+    Bedrock is unavailable — MEASURED 2026-09-03/04: every Bedrock model, on
+    both Converse and InvokeModel, began returning
+    ValidationException("Operation not allowed") account-wide while the
+    credentials themselves stayed valid. LlmChain already falls through to the
+    next provider on failure, so listing this after "nova" in
+    LLM_PROVIDER_ORDER makes that outage a degradation instead of a stoppage.
+
+    Chosen over Groq specifically because documents/pipeline.py and
+    documents/app.py send the page IMAGE alongside the OCR text (that pairing
+    is what fixed the redacted-field hallucination), and Gemini's vision
+    support covers that directly.
+
+    NOTE the benchmark caveat: a Gemini run measures GEMINI. It does not
+    validate a prompt change for Nova — only a Nova run does that.
+    """
+
+    _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    # Retries for 429/503 only. 3 attempts with 10s then 20s waits covers a
+    # passing capacity spike without stalling a run for minutes.
+    _MAX_ATTEMPTS = 3
+    _RETRY_WAIT_SECONDS = 10.0
+
+    def __init__(self, api_key: str, model: str, timeout: float, name: str = "gemini", max_tokens: int = 8192):
+        self.name = name
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+
+    def generate(
+        self,
+        system: str,
+        user_text: str,
+        image: bytes | None = None,
+        image_media_type: str | None = None,
+        want_json: bool = False,
+    ) -> str:
+        parts: list[dict] = [{"text": user_text}]
+        if image is not None:
+            parts.append({
+                "inline_data": {
+                    "mime_type": image_media_type or "image/png",
+                    "data": base64.b64encode(image).decode("ascii"),
+                }
+            })
+
+        generation_config: dict = {"temperature": 0.2, "maxOutputTokens": self.max_tokens}
+        if want_json:
+            # Gemini's own JSON mode. json_utils.parse_json_object still runs on
+            # the result — same defensive contract every provider has, since a
+            # truncated reply is still unparseable however it was requested.
+            generation_config["responseMimeType"] = "application/json"
+
+        payload = {
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": generation_config,
+        }
+
+        # Transient capacity (503 "experiencing high demand") and rate limits
+        # are absorbed HERE rather than reported to the chain, because the
+        # chain's cooldown is per-provider and persists across calls: in a
+        # sequential batch run one spike would otherwise put the only provider
+        # into a growing cooldown and every later document would be SKIPPED
+        # without an attempt. MEASURED 2026-09-04: that cascade took a 51-
+        # document run down to 9 successes. Only a still-failing provider after
+        # these retries is escalated, which is genuinely worth cooling down for.
+        last: LlmProviderError | None = None
+        for attempt in range(self._MAX_ATTEMPTS):
+            try:
+                # Key goes in a header, never the URL — an error message built
+                # from a URL would otherwise leak it (see classify_http_error).
+                response = httpx.post(
+                    self._ENDPOINT.format(model=self.model),
+                    json=payload,
+                    headers={"x-goog-api-key": self.api_key},
+                    timeout=self.timeout,
+                )
+            except httpx.TimeoutException as exc:
+                raise LlmTimeoutError(f"{self.name} timed out after {self.timeout}s") from exc
+            except httpx.HTTPError as exc:
+                raise LlmProviderError(f"{self.name} request failed: {type(exc).__name__}") from exc
+
+            if response.status_code == 200:
+                break
+            error = classify_http_error(self.name, response.status_code, response.text[:400])
+            if not isinstance(error, LlmRateLimitError) or attempt == self._MAX_ATTEMPTS - 1:
+                raise error
+            last = error
+            time.sleep(self._RETRY_WAIT_SECONDS * (attempt + 1))
+        else:  # pragma: no cover - loop always breaks or raises
+            raise last or LlmProviderError(f"{self.name} exhausted retries")
+
+        try:
+            data = response.json()
+            candidate = data["candidates"][0]
+            # A reply cut off by the token cap still has parts worth parsing;
+            # surface the reason instead when there is nothing at all, so the
+            # failure reads as "truncated" rather than "unexpected shape".
+            parts_out = candidate.get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts_out)
+            if not text:
+                raise LlmProviderError(
+                    f"{self.name} returned no text (finishReason="
+                    f"{candidate.get('finishReason')!r})"
+                )
+            return text
+        except LlmProviderError:
+            raise
+        except (KeyError, IndexError, ValueError) as exc:
+            raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response.text[:300]}") from exc

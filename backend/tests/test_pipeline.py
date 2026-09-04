@@ -59,7 +59,7 @@ def test_supported_script_image_calls_the_ocr_client_not_vision(monkeypatch):
         )
     )
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("other", 0.5))
-    monkeypatch.setattr(extractor, "extract_fields", lambda doc_type, text: [])
+    monkeypatch.setattr(extractor, "extract_fields_combined", lambda *a, **k: [])
     monkeypatch.setattr(extractor, "extract_fields_vision", lambda *a, **k: calls.__setitem__("vision", calls["vision"] + 1))
 
     result = process_document(b"imgbytes", "board.jpg", "image/jpeg", script="devanagari", ocr_client=fake_ocr)
@@ -347,8 +347,10 @@ def test_english_image_prefers_local_rapidocr_over_vision(monkeypatch):
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
     monkeypatch.setattr(
         extractor,
-        "extract_fields",
-        lambda doc_type, text: [{"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}],
+        "extract_fields_combined",
+        lambda doc_type, text, image_bytes, media_type: [
+            {"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}
+        ],
     )
     monkeypatch.setattr(extractor, "extract_fields_vision", lambda *a, **k: calls.__setitem__("vision", calls["vision"] + 1))
 

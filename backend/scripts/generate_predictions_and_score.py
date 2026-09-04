@@ -7,13 +7,27 @@ already-cached documents are skipped unless --force), then score every
 cached prediction against its ground truth and write one summary.
 
 No separate "normalize" stage or cached text folder: text/image extraction
-happens per-document, in-process, using app/documents/pdf_utils.py directly
-(pure PyMuPDF, no OCR dependency) — a born-digital page's real text is sent
-as text; a page with no text layer (scanned PDF or a raw image file) is
-rasterized and sent to the model as an image instead of running local OCR
-first. Nova is multimodal, so this hands it the actual page rather than a
-possibly-degraded OCR transcription, and it means this script never depends
-on the deepreef-ocr sibling checkout at all.
+happens per-document, in-process. A born-digital page's real text comes
+straight from app/documents/pdf_utils.py (pure PyMuPDF). A page with no text
+layer (scanned PDF or a raw image file) is rasterized and run through local
+OCR (app/documents/local_ocr.py's extract_english — RapidOCR's bundled
+English model, not deepreef-ocr's Devanagari model, which garbles English
+digits/table layout badly enough to misattribute whole rows — see this
+project's OCR comparison notes) plus text_repair's glued-word fix.
+
+The OCR/PyMuPDF text always goes to Nova; the ORIGINAL image goes too
+whenever exactly one image represents the whole document (a raw image file,
+or a single-page PDF) — MEASURED: text-only extraction cannot tell a blank/
+redacted box from a value that legitimately looks like the next field's own
+label, since OCR emits no signal at all for "there was a gap here" (see
+001_Lab-report.png: patient_name/patient_id/accession_no/... all came back
+as their own label text, e.g. "patient_name": "PATIENT NAME" — a prompt-only
+fix did not resolve it). A multi-page PDF still gets text-only: its pages
+are concatenated into one combined-document call, and there's no single
+image that represents "the whole document" to attach to that call — fixing
+that would mean extracting per-page like the production pipeline
+(documents/pipeline.py) does, which is a bigger restructuring than this
+script currently does.
 
 Usage:
     python scripts/generate_predictions_and_score.py
@@ -26,89 +40,85 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # backend/ on sys.path
 
 from app.benchmark.accumulator import MetricAccumulator  # noqa: E402
-from app.benchmark.compare import compare_fields, compare_tests  # noqa: E402
+from app.benchmark.compare import build_test_comparison_rows, compare_fields, compare_tests, field_comparison_rows  # noqa: E402
 from app.config import get_settings  # noqa: E402
-from app.documents import pdf_utils  # noqa: E402
+from app.dataset_normalization.text_repair import repair_glued_words  # noqa: E402
+from app.documents import local_ocr, pdf_utils  # noqa: E402
+from app.documents.app import extract_lab_report  # noqa: E402
 from app.llm.chain import LlmChain  # noqa: E402
-from app.llm.providers import NovaProvider  # noqa: E402
+from app.llm.factory import _build_chain  # noqa: E402
 
 DEFAULT_ROOT = r"G:\Shared drives\Product & Engineering\Projects\NABL Document Intelligence"
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+# Longest provider cooldown this batch will sit and wait through. Above
+# this, recording the failure and moving on beats stalling the whole run
+# (LlmChain caps its own backoff at 300s).
+_MAX_COOLDOWN_WAIT_SECONDS = 120.0
 
-_SYSTEM_PROMPT = (
-    "You are an information-extraction system for laboratory/testing reports "
-    "(milk, food, chemical, medical, and similar documents). Extract EVERY "
-    "key-value pair actually present in the document — never invent, guess, "
-    "or infer a value that isn't really there; if unsure, leave it out.\n\n"
-    "Respond with ONLY a JSON object of this exact shape:\n"
-    '{"fields": {"<snake_case_key>": "<value exactly as written>", ...}, '
-    '"tests": [{"test_name": "<name>", "result": "<value as written>", '
-    '"unit": "<unit or null>", "reference_range": "<range or null>"}, ...]}\n\n'
-    '"fields" holds every header/metadata value (names, dates, addresses, '
-    "report numbers, sample details, etc.) using natural snake_case keys "
-    'derived from the document\'s own labels. "tests" holds every row of a '
-    "results table. Use an empty list for \"tests\" if the document has no "
-    "tabular results."
-)
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+_IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".tif": "image/tiff", ".tiff": "image/tiff"}
 
 
 def _find_source_file(dataset_dir: Path, filename: str) -> Path | None:
     candidate = dataset_dir / filename
-    return candidate if candidate.is_file() else None
+    if candidate.is_file():
+        return candidate
+    # dataset/ is organized into subfolders (food/, medical/, ...) — the
+    # ground truth only records the bare filename, so fall back to a
+    # recursive search.
+    matches = [p for p in dataset_dir.rglob(filename) if p.is_file()]
+    return matches[0] if matches else None
 
 
-def _build_message_content(source_path: Path) -> tuple[list[dict], bytes | None, str | None]:
-    """Returns (text_content_blocks, single_image_bytes, media_type) — Nova's
-    content list mixes text and image blocks freely, so a page with a real
-    text layer contributes text, one without contributes its rasterized
-    image, in document order."""
+def _ocr_image_to_text(image_bytes: bytes) -> str:
+    result = local_ocr.extract_english(image_bytes)
+    return repair_glued_words(result.text)
+
+
+def _build_message_content(source_path: Path) -> tuple[str, bytes | None, str | None]:
+    """Returns (user_text, image_bytes, image_media_type). An image is
+    attached only when exactly one image legitimately represents the WHOLE
+    document — a raw image file, or a single-page PDF (rasterized here
+    regardless of whether it already has a text layer, purely to get pixels
+    to send alongside the text). A multi-page PDF's pages are concatenated
+    into one combined-document text blob for a single extraction call, and
+    there's no one image that represents "the whole document" to attach to
+    that call, so it stays text-only — see this module's docstring."""
     suffix = source_path.suffix.lower()
     data = source_path.read_bytes()
 
     if suffix in IMAGE_EXTENSIONS:
-        media_type = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
-        return [], data, media_type
+        return _ocr_image_to_text(data), data, _IMAGE_MEDIA_TYPES[suffix]
 
     if suffix != ".pdf":
         raise ValueError(f"unsupported file type: {suffix}")
 
     pages = pdf_utils.extract_text_and_boxes(data)
     count = pdf_utils.page_count(data)
-    text_blocks: list[dict] = []
-    image_bytes: bytes | None = None
+    text_blocks: list[str] = []
     for i in range(count):
         page = next((p for p in pages if p.page_number == i), None)
         text = page.text if page else ""
-        if len(text.strip()) >= 20:
-            text_blocks.append({"text": f"--- Page {i + 1} ---\n{text}"})
-        else:
-            # No usable text layer on this page — rasterize and attach as an
-            # image instead of running local OCR. Bedrock's Converse API
-            # accepts multiple image blocks in one message; kept simple here
-            # by taking only the first such page per document (a document
-            # mixing several image-only pages is rare in this dataset and
-            # multi-image requests cost more without much extra signal).
-            if image_bytes is None:
-                image_bytes = pdf_utils.rasterize_page(data, i)
-    return text_blocks, image_bytes, "image/png" if image_bytes else None
+        if len(text.strip()) < 20:
+            png_bytes = pdf_utils.rasterize_page(data, i)
+            text = _ocr_image_to_text(png_bytes)
+        text_blocks.append(f"--- Page {i + 1} ---\n{text}")
+    user_text = "\n\n".join(text_blocks)
+
+    if count == 1:
+        return user_text, pdf_utils.rasterize_page(data, 0), "image/png"
+    return user_text, None, None
 
 
 def _predict_one(chain: LlmChain, source_path: Path) -> dict:
-    text_blocks, image_bytes, media_type = _build_message_content(source_path)
-    user_text = "\n\n".join(b["text"] for b in text_blocks) if text_blocks else (
-        "(This document has no extractable text layer — read the attached image.)"
-    )
-    result = chain.generate_json(_SYSTEM_PROMPT, user_text, image=image_bytes, image_media_type=media_type)
-    return {
-        "fields": result.get("fields", {}) if isinstance(result, dict) else {},
-        "tests": result.get("tests", []) if isinstance(result, dict) else [],
-        "pipeline_error": None,
-    }
+    user_text, image_bytes, image_media_type = _build_message_content(source_path)
+    result = extract_lab_report(chain, user_text, image=image_bytes, image_media_type=image_media_type)
+    return {**result, "pipeline_error": None}
 
 
 def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir: Path, chain: LlmChain, force: bool = False) -> dict:
@@ -134,6 +144,16 @@ def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir:
         if source_path is None:
             prediction = {"fields": {}, "tests": [], "pipeline_error": f"source file not found: {ground_truth['original_filename']}"}
         else:
+            # This is a BATCH job, so waiting out a provider cooldown is right —
+            # the chain itself fails fast because an interactive request must
+            # not block, but here that means abandoning work. MEASURED
+            # 2026-09-04: one rate-limit cascade cost 37 of 51 documents, each
+            # failing instantly with "cooling down for Ns more" without a
+            # single API attempt. See LlmChain.seconds_until_available.
+            wait = chain.seconds_until_available()
+            if wait is not None and wait != float("inf") and wait <= _MAX_COOLDOWN_WAIT_SECONDS:
+                print(f"  (all providers cooling down, waiting {wait:.0f}s before {stem})", flush=True)
+                time.sleep(wait + 1)
             try:
                 prediction = _predict_one(chain, source_path)
             except Exception as exc:  # noqa: BLE001 — one bad document must never stop the batch
@@ -149,9 +169,11 @@ def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir:
     return stats
 
 
-def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict]]:
+def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict], list[dict], list[dict]]:
     overall = MetricAccumulator()
     rows: list[dict] = []
+    all_field_rows: list[dict] = []
+    all_test_rows: list[dict] = []
 
     for label_path in sorted(labelled_dir.glob("*/*.json")):
         stem = label_path.stem
@@ -164,8 +186,10 @@ def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict]]:
             prediction = {"fields": {}, "tests": [], "pipeline_error": "no cached prediction found"}
 
         extraction_ok = prediction.get("pipeline_error") is None
-        field_failures, field_counters = compare_fields(stem, ground_truth.get("fields", {}), prediction.get("fields", {}))
-        test_failures, test_counters = compare_tests(stem, ground_truth.get("tests", []), prediction.get("tests", []))
+        gt_fields, pred_fields = ground_truth.get("fields", {}), prediction.get("fields", {})
+        gt_tests, pred_tests = ground_truth.get("tests", []), prediction.get("tests", [])
+        field_failures, field_counters = compare_fields(stem, gt_fields, pred_fields)
+        test_failures, test_counters = compare_tests(stem, gt_tests, pred_tests)
         exact_match = extraction_ok and not field_failures and not test_failures
 
         doc_acc = MetricAccumulator()
@@ -181,8 +205,10 @@ def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict]]:
             "pipeline_error": prediction.get("pipeline_error"),
             **doc_acc.finalize(),
         })
+        all_field_rows.extend(field_comparison_rows(stem, gt_fields, pred_fields, prediction.get("field_verified")))
+        all_test_rows.extend(build_test_comparison_rows(stem, gt_tests, pred_tests))
 
-    return overall.finalize(), rows
+    return overall.finalize(), rows, all_field_rows, all_test_rows
 
 
 def write_results(summary: dict, rows: list[dict], output_dir: Path) -> None:
@@ -197,6 +223,108 @@ def write_results(summary: dict, rows: list[dict], output_dir: Path) -> None:
             writer.writerows(rows)
 
 
+# Status -> fill color for the comparison sheets, so a reviewer can scan a
+# whole sheet by eye instead of reading the "status" column cell by cell.
+_STATUS_COLORS = {
+    "correct": "C6EFCE", "missing": "FFEB9C", "wrong_value": "FFC7CE",
+    "wrong_key": "FFC7CE", "wrong_unit": "FFC7CE", "extra": "E4C7FF",
+}
+
+
+def _cell_value(value):
+    # A ground-truth/predicted "value" is occasionally a list (e.g. a
+    # multi-line field the labeler or the model captured as several
+    # strings) or a dict — openpyxl only accepts Excel-native scalar types,
+    # so anything else is flattened to its JSON text rather than crashing
+    # the whole export over one odd cell.
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _write_sheet(ws, rows: list[dict], status_key: str = "status") -> None:
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    if not rows:
+        ws.append(["(no rows)"])
+        return
+
+    columns = list(rows[0].keys())
+    ws.append(columns)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}1"
+
+    status_col = columns.index(status_key) + 1 if status_key in columns else None
+    for row in rows:
+        ws.append([_cell_value(row.get(c)) for c in columns])
+        if status_col:
+            color = _STATUS_COLORS.get(row.get(status_key))
+            if color:
+                ws.cell(ws.max_row, status_col).fill = PatternFill("solid", fgColor=color)
+
+    for i, column in enumerate(columns, start=1):
+        width = max(len(str(column)), *(len(str(r.get(column, ""))) for r in rows[:200]))
+        ws.column_dimensions[get_column_letter(i)].width = min(max(width + 2, 10), 60)
+
+
+def write_excel_workbook(
+    summary: dict, rows: list[dict], field_rows: list[dict], test_rows: list[dict], output_dir: Path
+) -> Path:
+    """A human-reviewable comparison workbook alongside summary.json/
+    per_document.csv — one row per ground-truth field/test (correct or
+    not), built from the exact same compare_fields/compare_tests matching
+    the scored metrics use (see field_comparison_rows/
+    build_test_comparison_rows in app/benchmark/compare.py), so this can
+    never disagree with the printed accuracy numbers.
+
+    Returns the path actually written. Reviewing comparison.xlsx in Excel
+    holds a Windows write lock on it, and this runs LAST — after every
+    (paid, slow) LLM call — so a lock here used to throw away a whole
+    completed run's reporting. Falls back to a timestamped filename
+    instead of failing."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    wb = Workbook()
+
+    summary_ws = wb.active
+    summary_ws.title = "Summary"
+    summary_ws.append(["metric", "value"])
+    for cell in summary_ws[1]:
+        cell.font = Font(bold=True)
+    for key, value in summary.items():
+        summary_ws.append([key, value])
+    summary_ws.append([])
+    summary_ws.append(["--- per document ---"])
+    if rows:
+        columns = list(rows[0].keys())
+        summary_ws.append(columns)
+        for cell in summary_ws[summary_ws.max_row]:
+            cell.font = Font(bold=True)
+        for row in rows:
+            summary_ws.append([row.get(c) for c in columns])
+    summary_ws.column_dimensions["A"].width = 28
+    summary_ws.column_dimensions["B"].width = 20
+
+    _write_sheet(wb.create_sheet("Fields"), field_rows)
+    _write_sheet(wb.create_sheet("Tests"), test_rows)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / "comparison.xlsx"
+    try:
+        wb.save(target)
+        return target
+    except PermissionError:
+        from datetime import datetime
+        fallback = output_dir / f"comparison-{datetime.now():%Y%m%d-%H%M%S}.xlsx"
+        wb.save(fallback)
+        print(f"\nNOTE: {target.name} is open in another program (locked) — wrote {fallback.name} instead.", file=sys.stderr)
+        return fallback
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--labelled", default=os.path.join(DEFAULT_ROOT, "labelled_dataset"), help="Ground truth directory (create_ground_truth.py's output).")
@@ -205,6 +333,11 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Re-run the LLM call even for already-predicted documents.")
     parser.add_argument("--predict-only", action="store_true")
     parser.add_argument("--score-only", action="store_true")
+    parser.add_argument(
+        "--providers", default=None,
+        help="Override LLM_PROVIDER_ORDER for this run, e.g. 'gemini' or 'nova,gemini'. "
+             "Useful to pin the benchmark to one provider so results stay comparable.",
+    )
     parser.add_argument(
         "--timeout", type=float, default=180.0,
         help="Per-call timeout in seconds (default: 180). The app's usual LLM_TIMEOUT_SECONDS (30s, tuned for "
@@ -224,10 +357,25 @@ def main() -> int:
     predictions_dir = output_dir / "predictions"
 
     settings = get_settings()
-    if not settings.nova_model:
-        print("NOVA_MODEL is not configured in .env — see NovaProvider in app/llm/providers.py.", file=sys.stderr)
+    # Honour LLM_PROVIDER_ORDER rather than hardcoding Nova, so a Bedrock
+    # outage can be ridden out on the fallback provider (MEASURED 2026-09-04:
+    # Bedrock returned "Operation not allowed" account-wide for a full day,
+    # which would otherwise have stopped the benchmark entirely).
+    #
+    # --timeout overrides llm_timeout_seconds for this run: the app's 30s
+    # default is tuned for short chat turns, whereas one document here is a
+    # full-page image plus its OCR text plus a ~1.5k-token system prompt, and
+    # a large results table takes far longer than 30s to generate.
+    settings = settings.model_copy(update={"llm_timeout_seconds": args.timeout})
+    chain = _build_chain(settings, args.providers or settings.llm_provider_order)
+    if not chain.providers:
+        print(
+            f"No LLM provider configured for order {args.providers or settings.llm_provider_order!r} — "
+            "set NOVA_MODEL and/or GEMINI_API_KEY in backend/.env (see .env.example).",
+            file=sys.stderr,
+        )
         return 1
-    chain = LlmChain([NovaProvider(settings.nova_model, settings.nova_region, args.timeout, max_tokens=settings.nova_max_tokens)])
+    print(f"LLM providers:    {', '.join(p.name for p in chain.providers)} (timeout {args.timeout:.0f}s)")
 
     print(f"Labelled dataset: {labelled_dir}")
     print(f"Dataset (raw):    {dataset_dir}")
@@ -245,12 +393,14 @@ def main() -> int:
             print(f"  {name}: {reason}")
 
     if not args.predict_only:
-        summary, rows = score(labelled_dir, predictions_dir)
+        summary, rows, field_rows, test_rows = score(labelled_dir, predictions_dir)
         write_results(summary, rows, output_dir)
+        workbook_path = write_excel_workbook(summary, rows, field_rows, test_rows, output_dir)
         print()
         print("=== Score Summary ===")
         for key, value in summary.items():
             print(f"{key}: {value}")
+        print(f"\nComparison workbook: {workbook_path}")
 
     return 0
 

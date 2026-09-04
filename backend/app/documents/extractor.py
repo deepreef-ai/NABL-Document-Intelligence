@@ -138,13 +138,12 @@ _JSON_INSTRUCTION = (
 
 
 def normalize_llm_fields(raw: list) -> list[dict]:
-    """A capable cloud model (Gemini/Groq/...) reliably includes every key
-    the prompt asks for. A small local model under Ollama's generic
-    `format: json` grammar (which only enforces "this is valid JSON", not a
-    specific schema) sometimes doesn't — e.g. omitting "confidence" entirely
-    on some entries, observed in practice with qwen2.5:3b. Every downstream
-    consumer (documents/pipeline.py, compiler.py) indexes "field"/"value"/
-    "confidence" unconditionally, so normalize once here, right at the LLM
+    """Nova reliably includes every key the prompt asks for, but a JSON-mode
+    LLM reply is never a guaranteed schema match — a missing "confidence" on
+    some entry is defended against here rather than assumed away. Every
+    downstream consumer (documents/pipeline.py, compiler.py) indexes
+    "field"/"value"/"confidence" unconditionally, so normalize once here,
+    right at the LLM
     boundary, instead of pushing defensive .get()s through every call site."""
     normalized = []
     for item in raw:
@@ -174,6 +173,27 @@ def extract_fields_vision(doc_type: str, image_bytes: bytes, media_type: str) ->
     if not fields:
         return []
     prompt = f"Fields to extract: {', '.join(fields)}\n\n{_JSON_INSTRUCTION}"
+    result = get_llm_chain().generate_json(system=_SYSTEM, user_text=prompt, image=image_bytes, image_media_type=media_type)
+    return _filter_to_requested_fields(doc_type, fields, normalize_llm_fields(result["fields"]))
+
+
+def extract_fields_combined(doc_type: str, text: str, image_bytes: bytes, media_type: str) -> list[dict]:
+    """Scanned-page / photo path: OCR text AND the original image in one Nova
+    call — the OCR text carries reading order and gives the model a spelling
+    prior, the image lets it recover anything OCR mangled or missed
+    (skewed stamps, faint handwriting, a misread digit). Distinct from
+    extract_fields (born-digital PDF, text only — PyMuPDF's text layer is
+    already reliable, no image needed) and extract_fields_vision (fallback
+    for scripts deepreef-ocr can't OCR at all, so there's no text to pair
+    with the image)."""
+    fields = FIELD_SETS.get(doc_type, [])
+    if not fields:
+        return []
+    prompt = (
+        f"Fields to extract: {', '.join(fields)}\n\n"
+        f"OCR-extracted text (may contain errors — the image is ground truth):\n\n{text[:8000]}\n\n"
+        f"{_JSON_INSTRUCTION}"
+    )
     result = get_llm_chain().generate_json(system=_SYSTEM, user_text=prompt, image=image_bytes, image_media_type=media_type)
     return _filter_to_requested_fields(doc_type, fields, normalize_llm_fields(result["fields"]))
 
@@ -288,10 +308,9 @@ def extract_full_form_fields(form_type: str, text: str) -> list[dict]:
 def extract_full_form_fields_chunked(form_type: str, chunks: list[str]) -> tuple[list[dict], list[str]]:
     """The real entry point for a multi-page filled-form upload: one LLM call
     per page/chunk instead of one giant prompt — keeps every call well within
-    any provider's context/payload limits (crucial for Ollama's small default
-    context and for Groq/HF's hard request-size caps alike; see
-    llm/factory.py's get_chunked_extraction_chain for the chunked-extraction
-    provider order), and lets each chunk find only what's actually on it.
+    the provider's context/payload limits (see llm/factory.py's
+    get_chunked_extraction_chain for the chunked-extraction provider order),
+    and lets each chunk find only what's actually on it.
 
     Each chunk's LLM call re-starts every repeating entity's index from 0 (it
     has no idea what earlier chunks found), so results are re-indexed against
@@ -335,10 +354,9 @@ def extract_section_fields(field_templates: list[str], texts: list[str]) -> list
 
     The LLM is told (see _FULL_FORM_SYSTEM) to omit any field it didn't find,
     rather than spelling out a null entry for every one it was asked about —
-    for a slow local model (llm/providers.py's OllamaProvider) generating
-    that JSON is the expensive part, and most of a section's requested fields
-    are typically absent on any given document, so this measurably cuts
-    output size and generation time. But pipeline.py's verification retry
+    most of a section's requested fields are typically absent on any given
+    document, so this measurably cuts output size and generation time. But
+    pipeline.py's verification retry
     pass (_process_completed_application_form) needs to see an explicit
     None-valued entry for every flat field it didn't get a value for, to
     know what's worth a second, targeted look — so those get backfilled

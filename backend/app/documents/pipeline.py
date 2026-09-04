@@ -272,9 +272,9 @@ def _process_docx(data: bytes, form_type: str) -> PipelineResult:
     return PipelineResult(doc_type, doc_confidence, "docx", fields, warnings)
 
 
-def _process_ocr_result(ocr_result: OcrResult, source: str) -> PipelineResult:
+def _process_ocr_result(ocr_result: OcrResult, source: str, image_bytes: bytes, media_type: str) -> PipelineResult:
     doc_type, doc_confidence = classifier.classify_text(ocr_result.text)
-    raw_fields = extractor.extract_fields(doc_type, ocr_result.text)
+    raw_fields = extractor.extract_fields_combined(doc_type, ocr_result.text, image_bytes, media_type)
     candidates = list(zip(ocr_result.lines, ocr_result.boxes))
     fields = []
     for f in raw_fields:
@@ -284,8 +284,10 @@ def _process_ocr_result(ocr_result: OcrResult, source: str) -> PipelineResult:
 
 
 def _process_image(data: bytes, content_type: str, script: str, ocr_client: OcrClient) -> PipelineResult:
+    media_type = content_type if content_type.startswith("image/") else "image/jpeg"
+
     if script in SUPPORTED_SCRIPTS:
-        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}")
+        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}", data, media_type)
 
     if script == "english":
         # Local RapidOCR (the same engine deepreef-ocr's Lambda runs, using
@@ -295,15 +297,15 @@ def _process_image(data: bytes, content_type: str, script: str, ocr_client: OcrC
         # this script. Only falls through to the vision LLM below if it
         # itself isn't usable (not installed, corrupt image, etc.).
         try:
-            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english")
+            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english", data, media_type)
         except local_ocr.LocalOcrError:
             pass
 
     # Any other script deepreef-ocr doesn't support, or a local-OCR failure:
-    # read the page directly with a vision LLM call. No per-field bbox
-    # available this way — documented limitation, see the plan's "English-OCR
-    # gap" section (now only reached when local OCR itself fails).
-    media_type = content_type if content_type.startswith("image/") else "image/jpeg"
+    # there's no OCR text at all here, so read the page directly with a
+    # vision-only LLM call. No per-field bbox available this way —
+    # documented limitation, see the plan's "English-OCR gap" section (now
+    # only reached when local OCR itself fails).
     doc_type, doc_confidence = classifier.classify_image(data, media_type)
     raw_fields = extractor.extract_fields_vision(doc_type, data, media_type)
     fields = [FieldResult(f["field"], f["value"], f["confidence"]) for f in raw_fields]
