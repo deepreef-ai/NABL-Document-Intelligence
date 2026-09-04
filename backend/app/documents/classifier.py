@@ -1,3 +1,5 @@
+import re
+
 from app.llm.base import LlmProviderError
 from app.llm.factory import get_llm_chain
 
@@ -125,3 +127,118 @@ def classify_locally(text: str, page_count: int, form_type: str) -> tuple[str, f
     if hits >= _MIN_SECTION_HITS:
         return "completed_application_form", 0.9
     return None
+
+
+# --- Confidence-scored local classification ---------------------------------
+# classify_locally() above answers exactly one question ("is this the whole
+# filled form?") and refuses below 5 pages, so EVERY single-page upload — the
+# common case — paid for an LLM classification call. This adds a scored
+# classifier covering the doc types we can recognise deterministically, with
+# no page-count gate: a lab report that prints SPECIMEN / TEST / RESULT /
+# REFERENCE RANGE is not ambiguous, and asking a model about it is waste.
+#
+# Confidence is a bounded sum of independent signals, NOT a probability. It
+# is calibrated only against the threshold it is compared to
+# (local_classification_min_confidence); a value of 0.8 means "several
+# independent signals agree", not "80% likely correct".
+
+# Terminology that only appears on an actual laboratory/test report.
+_LAB_TERMS = (
+    "reference range", "reference interval", "bio ref", "biological reference",
+    "specimen", "sample name", "sample id", "test report", "test result",
+    "result of analysis", "results of analysis", "parameters", "test parameter",
+    "method of analysis", "protocol", "ulr", "analysis report", "discipline",
+)
+# Terminology specific to the supporting-certificate doc types.
+_DOC_TYPE_TERMS: dict[str, tuple[str, ...]] = {
+    "equipment_calibration_certificate": (
+        "calibration certificate", "calibrated on", "calibration due", "traceability",
+        "least count", "uncertainty of measurement",
+    ),
+    "staff_cv_certificate": (
+        "curriculum vitae", "resume", "qualification", "work experience", "designation",
+    ),
+    "pt_ilc_result": (
+        "proficiency testing", "inter laboratory", "interlaboratory", "z-score", "z score",
+        "en value", "pt provider",
+    ),
+    "legal_proof": (
+        "gstin", "gst number", "permanent account number", "pan no", "tan no",
+        "certificate of incorporation", "registrar of companies",
+    ),
+    "reference_material_certificate": (
+        "certified reference material", "reference material", "crm", "certificate of analysis",
+    ),
+}
+# Bare column headers. Individually far too common to mean anything, which
+# is why they only ever count ALONGSIDE >=3 detected result rows: a real lab
+# report prints "Test | Result | Unit | Reference Range" as a table header,
+# and the phrase list above misses that because it looks for prose phrases.
+_LAB_HEADER_TOKENS = (
+    "test", "result", "unit", "patient", "sample", "method", "report", "range", "limit",
+)
+# A results-table row: name, number, optional unit/range.
+_RESULT_ROW_PATTERN = re.compile(r"[A-Za-z][A-Za-z ()/.-]{2,}\s+[<>]?\d+(?:\.\d+)?", re.MULTILINE)
+
+
+def _count_terms(haystack: str, terms: tuple[str, ...]) -> int:
+    return sum(1 for t in terms if t in haystack)
+
+
+def classify_locally_scored(
+    text: str, page_count: int, form_type: str, filename: str = ""
+) -> tuple[str, float]:
+    """(doc_type, confidence) with NO LLM call. Confidence 0.0 means "no
+    idea, ask the model"; the caller compares it against
+    local_classification_min_confidence.
+
+    Deliberately conservative in one direction: it will happily return 0.0
+    (costing a classification call), but it should not confidently return the
+    WRONG type, because that silently routes the document to the wrong
+    FIELD_SETS and the error never surfaces.
+    """
+    low = (text or "").lower()
+    name_low = (filename or "").lower()
+
+    # 1. The whole filled form — reuse the existing conservative check first,
+    #    then allow the same evidence to count below 5 pages too.
+    existing = classify_locally(text, page_count, form_type)
+    if existing is not None:
+        return existing
+    section_hits = sum(1 for s in _section_names(form_type) if s.replace("_", " ") in low)
+    if section_hits >= _MIN_SECTION_HITS and page_count >= 2:
+        # Same evidence classify_locally wants, minus the page-count gate;
+        # scored rather than asserted, so a borderline case still defers.
+        return "completed_application_form", min(0.6 + 0.1 * (section_hits - _MIN_SECTION_HITS), 0.9)
+
+    # 2. A specific supporting-certificate type, when its own vocabulary and
+    #    the filename agree.
+    best_type, best_score = "", 0.0
+    for doc_type, terms in _DOC_TYPE_TERMS.items():
+        hits = _count_terms(low, terms)
+        if not hits:
+            continue
+        score = 0.45 + 0.15 * min(hits, 3)
+        if any(t.split()[0] in name_low for t in terms):
+            score += 0.1
+        if score > best_score:
+            best_type, best_score = doc_type, score
+    if best_type and best_score >= 0.7:
+        return best_type, min(best_score, 0.95)
+
+    # 3. A laboratory/test report that isn't one of the NABL supporting types.
+    #    These are the documents FIELD_SETS has no entry for, so the model was
+    #    being asked to classify something that routes to "other" anyway —
+    #    the single most wasteful classification call in the pipeline.
+    lab_hits = _count_terms(low, _LAB_TERMS)
+    header_hits = _count_terms(low, _LAB_HEADER_TOKENS)
+    result_rows = len(_RESULT_ROW_PATTERN.findall(text or ""))
+    # Structure is the load-bearing signal: vocabulary alone is not enough
+    # (a covering letter can say "test report"), and rows alone are not
+    # either (an invoice has numeric rows). Both must hold.
+    if result_rows >= 3 and (lab_hits + header_hits) >= 4:
+        return "other", min(0.7 + 0.04 * min(lab_hits + header_hits - 4, 5), 0.9)
+
+    if best_type:
+        return best_type, best_score  # below threshold; caller will ask the model
+    return "other", 0.0

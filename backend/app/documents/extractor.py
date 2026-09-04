@@ -318,9 +318,21 @@ def _sanitize_open_fields(fields: list[dict]) -> list[dict]:
 _INDEX_PATTERN = re.compile(r"\[\d+\]")
 
 
+# Schema attributes that exist to HOLD extraction output rather than to be
+# extracted. `extra_fields` is the compiled form's bucket for open-ended
+# key/values that have no schema slot (see documents/compiler.py) — asking
+# the model to "extract extra_fields" is meaningless, and because
+# retrieval.group_templates_by_section buckets by top-level attribute it
+# would also become its own section and cost one whole extra LLM call per
+# whole-form document.
+_NOT_EXTRACTABLE = {"extra_fields"}
+
+
 def _flatten_schema(model_cls: type[BaseModel], prefix: str = "", depth: int = 0, max_depth: int = 2) -> list[str]:
     paths: list[str] = []
     for name, field in model_cls.model_fields.items():
+        if name in _NOT_EXTRACTABLE:
+            continue
         annotation = field.annotation
         origin = get_origin(annotation)
         args = get_args(annotation)

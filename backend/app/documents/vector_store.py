@@ -55,13 +55,26 @@ def index_chunks(document_id: str, chunk_ids: list[int], texts: list[str], vecto
 
 def query_top_k(document_id: str, query_vector: list[float], top_k: int) -> list[int]:
     """Returns matching chunk_ids (== page numbers, see retrieval.py), best match first."""
+    return [chunk_id for chunk_id, _score in query_top_k_scored(document_id, query_vector, top_k)]
+
+
+def query_top_k_scored(
+    document_id: str, query_vector: list[float], top_k: int
+) -> list[tuple[int, float]]:
+    """(chunk_id, similarity) pairs, best match first.
+
+    The score used to be discarded, which meant callers always took the top K
+    however poor the match — on a document whose pages are all irrelevant to a
+    section, that sent 4 arbitrary pages to the LLM as "evidence". Exposing it
+    lets retrieval.py drop anything below retrieval_min_score.
+    """
     with _lock:
         client = _get_client()
         name = _collection_name(document_id)
         if not client.collection_exists(name):
             return []
         result = client.query_points(name, query=query_vector, limit=top_k)
-        return [point.payload["chunk_id"] for point in result.points]
+        return [(point.payload["chunk_id"], float(point.score or 0.0)) for point in result.points]
 
 
 def drop_collection(document_id: str) -> None:

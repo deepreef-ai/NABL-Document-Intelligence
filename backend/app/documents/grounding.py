@@ -21,6 +21,14 @@ class FieldResult:
     # extract_open_fields*) are routed by compiler.py into the compiled
     # form's extra_fields bucket rather than a named schema attribute.
     source: str = "llm"
+    # The specific source line a value was matched to, when grounding found
+    # one. Previously a failed match left only source_bbox=None, so
+    # "extracted but unsupported by any text we read" was indistinguishable
+    # from "extracted and grounded, just off-page" — which is exactly the
+    # signal deterministic_validation.py needs.
+    source_text: str | None = None
+    # Page-level OCR confidence when this value came off an OCR'd page.
+    ocr_confidence: float | None = None
 
 
 @dataclass
@@ -42,6 +50,11 @@ class PipelineResult:
     # really read all 17 pages of this scan" is the first question worth
     # answering when an extraction looks thin, and it's invisible otherwise.
     page_count: int | None = None
+    # Per-document LLM call log (documents/call_budget.py's as_dict()).
+    # Empty dict on the legacy path, which never counted its calls.
+    call_log: dict = field(default_factory=dict)
+    # Deterministic validation outcome, when the optimised path ran it.
+    validation: dict = field(default_factory=dict)
 
 
 def ground(value: str, candidates: list[tuple[str, Rect]]) -> Rect | None:

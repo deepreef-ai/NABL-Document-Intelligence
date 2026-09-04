@@ -157,6 +157,46 @@ class Settings(BaseSettings):
     # roughly halves that and keeps form text legible.
     page_image_dpi: int = 110
 
+    # --- LLM call budget (documents/call_budget.py) -----------------------
+    # Every Nova call is metered against these. MEASURED 2026-09-03 before
+    # this existed: a 1-page certificate cost 3 calls (classify + schema +
+    # unified) and a long completed_application_form cost 11-21 (one call per
+    # schema section plus one retry per section plus the unified pass), with
+    # nothing counting or capping them. The pipeline stops retrying once
+    # max_total_llm_calls is reached rather than looping.
+    max_classification_calls: int = 1
+    max_initial_extraction_calls: int = 4
+    max_recovery_calls: int = 2
+    max_total_llm_calls: int = 6
+
+    # Local (LLM-free) classification is trusted at or above this confidence;
+    # below it, and only if the budget allows, Nova is asked instead.
+    local_classification_min_confidence: float = 0.70
+
+    # Dense-retrieval similarity below this is treated as "this page is not
+    # evidence for that field", instead of always taking the top K whatever
+    # their scores (which is what retrieval.py did before).
+    retrieval_min_score: float = 0.25
+
+    # Chunk budget for adaptive grouping (documents/adaptive_chunking.py).
+    # Chars, not tokens: everything else in this codebase measures text in
+    # chars, and ~4 chars/token is close enough to keep one estimate rather
+    # than adding a tokenizer dependency.
+    max_chunk_chars: int = 12000
+
+    # OCR below this confidence marks a page as *possibly* needing visual
+    # verification. It does NOT by itself trigger a Nova vision call — see
+    # documents/recovery.py for the escalation policy.
+    ocr_low_confidence_threshold: float = 0.75
+
+    # Hard cap on page images per extraction call. Every provider except
+    # Nova rejects more than one image per request, so a low cap keeps the
+    # fallback chain usable instead of making Nova a hard dependency.
+    max_images_per_call: int = 2
+
+    # Rollback switch: False restores the pre-optimisation extraction path.
+    optimized_extraction_enabled: bool = True
+
     database_url: str = "sqlite:///./nabl.db"
     storage_dir: str = "./storage"
 

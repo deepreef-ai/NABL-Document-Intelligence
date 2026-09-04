@@ -6,7 +6,20 @@ computation, never a duplicated formula.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+def _percentile(values: list[int], pct: float) -> int | None:
+    """Nearest-rank percentile. No numpy dependency for one number, and
+    nearest-rank is the honest choice for small samples: it returns a value
+    that a document actually cost, not an interpolation between two."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    import math
+
+    rank = max(1, math.ceil(pct / 100 * len(ordered)))
+    return ordered[rank - 1]
 
 
 @dataclass
@@ -36,12 +49,31 @@ class MetricAccumulator:
     test_name_total: int = 0
     test_result_correct: int = 0
     test_result_total: int = 0  # == matched test rows
+    # --- LLM call metrics (spec section 16) -----------------------------
+    # Additive and completely separate from the quality counters above: a
+    # call reduction that costs accuracy must stay visible, so these are
+    # reported ALONGSIDE precision/recall/F1, never folded into them.
+    classification_calls: int = 0
+    extraction_calls: int = 0
+    recovery_calls: int = 0
+    vision_calls: int = 0
+    total_llm_calls: int = 0
+    calls_per_document: list[int] = field(default_factory=list)
 
-    def add(self, *, domain_match: bool, extraction_ok: bool, exact_match: bool, field_counters: dict, test_counters: dict) -> None:
+    def add(self, *, domain_match: bool, extraction_ok: bool, exact_match: bool, field_counters: dict, test_counters: dict, call_log: dict | None = None) -> None:
         self.document_count += 1
         self.domain_correct += int(domain_match)
         self.extraction_success += int(extraction_ok)
         self.exact_match += int(exact_match)
+
+        if call_log:
+            self.classification_calls += int(call_log.get("classification_calls") or 0)
+            self.extraction_calls += int(call_log.get("extraction_calls") or 0)
+            self.recovery_calls += int(call_log.get("recovery_calls") or 0)
+            self.vision_calls += int(call_log.get("vision_calls") or 0)
+            total = int(call_log.get("total_llm_calls") or 0)
+            self.total_llm_calls += total
+            self.calls_per_document.append(total)
 
         self.key_tp += field_counters["key_tp"]
         self.key_fp += field_counters["key_fp"]
@@ -125,4 +157,20 @@ class MetricAccumulator:
             "test_name_accuracy": ratio(self.test_name_matched, self.test_name_total),
             "test_result_accuracy": ratio(self.test_result_correct, self.test_result_total),
             "test_unit_mapping_accuracy": ratio(self.unit_correct, self.test_result_total),
+            # --- call metrics (see the counters' comment above) ---------
+            "classification_calls": self.classification_calls,
+            "extraction_calls": self.extraction_calls,
+            "recovery_calls": self.recovery_calls,
+            "vision_calls": self.vision_calls,
+            "total_llm_calls": self.total_llm_calls,
+            "average_calls": (
+                round(self.total_llm_calls / len(self.calls_per_document), 4)
+                if self.calls_per_document else None
+            ),
+            # p95 by nearest-rank on the sorted per-document counts. On a
+            # 52-document run that is the 50th value, i.e. "the worst
+            # document short of the outliers" - the number that says whether
+            # the budget actually holds in practice, which a mean hides.
+            "p95_calls": _percentile(self.calls_per_document, 95),
+            "max_calls": max(self.calls_per_document) if self.calls_per_document else None,
         }

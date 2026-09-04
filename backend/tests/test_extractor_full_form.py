@@ -190,3 +190,15 @@ def test_extract_full_form_fields_chunked_keeps_earlier_chunks_when_a_later_one_
     assert fields == [{"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}]
     assert len(warnings) == 1
     assert "chunk 1" in warnings[0]
+
+
+def test_extra_fields_is_not_offered_as_an_extractable_field():
+    """extra_fields exists to HOLD open-ended output (documents/compiler.py),
+    not to be extracted. Left in, retrieval.group_templates_by_section makes
+    it its own section, costing one whole extra LLM call per whole-form
+    document to ask the model for a field literally named "extra_fields"."""
+    from app.documents import retrieval
+
+    templates = extractor.form_field_templates("NABL_151")
+    assert not [t for t in templates if "extra_fields" in t]
+    assert "extra_fields" not in retrieval.group_templates_by_section(templates)

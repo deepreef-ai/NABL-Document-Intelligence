@@ -1,6 +1,7 @@
 import logging
 import mimetypes
 
+from app.config import get_settings
 from app.documents import classifier, extractor, local_ocr, pdf_utils, unified_extraction
 from app.documents.docx_utils import extract_text as extract_docx_text
 from app.documents.geometry import Rect
@@ -127,11 +128,50 @@ def process_document(
     ocr_client = ocr_client or OcrClient()
     kind = _guess_kind(filename, content_type)
 
+    # DOCX keeps the legacy path: it has no page raster to inspect or send,
+    # so page-level inspection, table detection and vision escalation have
+    # nothing to work with. PDFs and images go through the budgeted
+    # orchestrator (documents/orchestrator.py).
+    if kind != "docx" and get_settings().optimized_extraction_enabled:
+        suffix = ".pdf" if kind == "pdf" else _image_suffix(content_type)
+        try:
+            return _from_orchestrator(
+                data, suffix, filename, script, ocr_client, form_type, document_id
+            )
+        except Exception as exc:  # noqa: BLE001 — a bug in the new path must not
+            # take uploads down; fall back to the pipeline that was working
+            # before it, with the reason recorded.
+            log.warning("optimised extraction failed, falling back to legacy path: %s", exc)
+
     if kind == "pdf":
         return _process_pdf(data, script, ocr_client, form_type, document_id)
     if kind == "docx":
         return _process_docx(data, form_type)
     return _process_image(data, content_type or "image/jpeg", script, ocr_client)
+
+
+def _from_orchestrator(
+    data: bytes, suffix: str, filename: str, script: str,
+    ocr_client: OcrClient | None, form_type: str, document_id: str,
+) -> PipelineResult:
+    """Adapter: keeps PipelineResult's existing shape so routers/documents.py,
+    compiler.py and the review UI need no changes."""
+    from app.documents import orchestrator
+
+    result = orchestrator.run(
+        data, suffix, filename=filename, script=script, ocr_client=ocr_client,
+        form_type=form_type, document_id=document_id,
+    )
+    return PipelineResult(
+        result.doc_type,
+        result.doc_confidence,
+        result.extraction_source,
+        result.fields,
+        result.warnings,
+        page_count=result.page_count,
+        call_log=result.call_log,
+        validation=result.validation,
+    )
 
 
 def _classify_and_extract_text(

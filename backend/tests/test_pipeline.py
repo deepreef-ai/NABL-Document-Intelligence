@@ -8,6 +8,14 @@ from app.documents.ocr_client import OcrResult
 from app.documents.pipeline import _guess_kind, process_document
 
 
+def _settings_with(**overrides):
+    """A copy of the real Settings with specific fields overridden — keeps
+    every other configured value real rather than hand-building a fake."""
+    from app.config import get_settings
+
+    return get_settings().model_copy(update=overrides)
+
+
 @pytest.fixture(autouse=True)
 def _no_open_extraction_by_default(monkeypatch):
     """Every test below predates the shared unified-extraction path
@@ -21,6 +29,12 @@ def _no_open_extraction_by_default(monkeypatch):
     so a test that wants to exercise it only overrides build_payload/extract
     and still runs the real grounding/table-flattening logic around them.
     """
+    # Every test below asserts the LEGACY (pre-budget) extraction path, so the
+    # optimised orchestrator is off by default here. Left on, these tests
+    # would exercise real page rasterization, real embeddings and a real LLM
+    # chain — slow, and not what they are asserting. Orchestrator behaviour
+    # is covered by tests/test_orchestrator.py instead.
+    monkeypatch.setattr(pipeline, "get_settings", lambda: _settings_with(optimized_extraction_enabled=False))
     monkeypatch.setattr(pipeline.unified_extraction, "build_payload",
                          lambda *a, **k: pipeline.unified_extraction.DocumentPayload())
     monkeypatch.setattr(pipeline.unified_extraction, "extract",

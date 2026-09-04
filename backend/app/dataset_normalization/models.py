@@ -37,6 +37,11 @@ class NormalizedPage:
     ocr_used: bool
     elements: list[OcrElement] = field(default_factory=list)
     ocr_confidence: float | None = None  # page-level mean confidence, only when ocr_used
+    # Whether this page appears to contain a results table. Drives adaptive
+    # chunking (a table must not be split across two extraction calls) and
+    # retrieval (a table-bearing page is kept as evidence for test rows) —
+    # see documents/page_inspection.py's detect_table.
+    has_table: bool = False
 
 
 @dataclass

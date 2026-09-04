@@ -244,6 +244,9 @@ class NovaProvider(LlmProvider):
 
     def __init__(self, model: str, region: str, timeout: float, name: str = "nova", max_tokens: int = 8192):
         self.name = name
+        # Token counts from the most recent call, or None before any call —
+        # see generate() on why this lives on the instance.
+        self.last_usage: dict[str, int] | None = None
         self.model = model
         self.region = region
         self.timeout = timeout
@@ -296,6 +299,18 @@ class NovaProvider(LlmProvider):
             )
         except (BotoCoreError, ClientError) as exc:
             raise classify_boto_error(self.name, exc) from exc
+
+        # Bedrock reports real token counts on every Converse response and
+        # this used to throw them away, which is why cost could only ever be
+        # estimated. Recorded on the instance (last call) so a caller holding
+        # a CallBudget can attribute it without changing the generate()
+        # signature every provider shares. MEASURED 2026-09-03 on a 1-page
+        # report: 1053 in / 831 out.
+        usage = response.get("usage") or {}
+        self.last_usage = {
+            "input_tokens": int(usage.get("inputTokens") or 0),
+            "output_tokens": int(usage.get("outputTokens") or 0),
+        }
 
         try:
             parts = response["output"]["message"]["content"]
