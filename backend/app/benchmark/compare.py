@@ -31,6 +31,14 @@ _PLACEHOLDER_SENTINELS = {"n/a", "na", "null", "none", "-", "--", "tbd", ""}
 # interchangeably with a plain hyphen — fold to one form before comparing.
 _DASH_VARIANTS = re.compile("[‐‑‒–—―−]")
 _WHITESPACE = re.compile(r"\s+")
+# Separator punctuation, REMOVED before comparing (see _normalize_value):
+# values are matched on their characters, words and numbers, not on which
+# separator each side happened to use. "." and "-" are deliberately NOT
+# here — they carry numeric meaning ("6.5", "40-129").
+_SEPARATORS = re.compile(r"[,|/;]")
+# Leading "Page"/"Page No"/"Page:" label on a page field (applied to the
+# already-normalized text, which has no spaces).
+_PAGE_LABEL = re.compile(r"^page(?:no)?[.:]*")
 
 
 def _normalize_value(value: Any) -> str | None:
@@ -48,6 +56,17 @@ def _normalize_value(value: Any) -> str | None:
     if text in _PLACEHOLDER_SENTINELS:
         return None
     text = _DASH_VARIANTS.sub("-", text)
+    # Separator punctuation is dropped entirely, so two values are compared
+    # on their characters, words and numbers rather than on punctuation. BOTH
+    # sides invent separators: the page lays address parts out on separate
+    # lines or with "|", the labeler wrote commas, the model wrote "/" or a
+    # newline — MEASURED on this corpus, a comma present on one side and
+    # absent on the other was the single most common "punctuation only"
+    # mismatch (lab_address, lab_website, client_address).
+    #
+    # "." and "-" are NOT dropped: they carry numeric meaning, and removing
+    # them would collapse "6.5" to "65" and "40-129" to "40129".
+    text = _SEPARATORS.sub("", text)
     text = _WHITESPACE.sub("", text)
     # Trailing sentence punctuation is not part of the value: a labeler
     # transcribing "EDTA Blood." and a model returning "EDTA Blood" read the
@@ -57,6 +76,21 @@ def _normalize_value(value: Any) -> str | None:
     # rejected: it wrongly credited a dropped date and a dropped specialty).
     text = text.rstrip(".,;:")
     return text or None
+
+
+def _normalize_field_value(key: str, value: Any) -> str | None:
+    """_normalize_value, plus the page-label rule.
+
+    A page cell prints as "Page 4 Of 15": the label is "Page" and the value
+    is "4 Of 15", so a model returning either form has read it correctly.
+    MEASURED on this corpus as the most common truncation mismatch. Scoped to
+    the page field ON PURPOSE — a general "one value contains the other" rule
+    was measured and rejected because it also credited a dropped date
+    ("09:55:20" for "03/02/2019 09:55:20") and a dropped specialty."""
+    norm = _normalize_value(value)
+    if norm and _KEY_ALIASES.get(key, key) == "page":
+        norm = _PAGE_LABEL.sub("", norm) or None
+    return norm
 
 
 def _normalize_test_name(name: Any) -> str:
@@ -105,6 +139,25 @@ _KEY_ALIASES = {
     "group_2": "secondary_group",             # 2
     "pathologist": "signatory_name",          # 2 - gold used the document's
                                               # own word, prompt says signatory_name
+    # From the Gemini run's wrong_key rows. lab_fax->lab_phone is safe
+    # despite being different concepts in general: these labs print one
+    # "Telefax" line, so the SAME number is the phone and the fax, and the
+    # fold only ever credits a matching value anyway.
+    "lab_fax": "lab_phone",                   # 7 docs
+    "customer_reference": "reference_number", # 6
+    # Gold-internal inconsistencies, found by auditing MY OWN labels for the
+    # same concept spelled differently across documents (an objective test,
+    # independent of whether folding them helps any score):
+    #   footer (36 docs) vs disclaimer (5)
+    #   testing_lab_address (20) vs tested_in (4)
+    #   note (19) vs limits_note (7)
+    # NOT folded, deliberately: lab_address vs testing_lab_address (genuinely
+    # two different labs), and the "page" convention — gold consistently
+    # includes the word "Page" in 43 of 46 documents, so a model dropping it
+    # is real variance, not a labelling bug.
+    "disclaimer": "footer",
+    "tested_in": "testing_lab_address",
+    "limits_note": "note",
     "customer_name": "client_name",
     "name_of_the_customer": "client_name",
     "report_date": "report_issue_date",
@@ -156,8 +209,8 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
     ground_truth = _canonicalize_keys(ground_truth)
     predicted = _canonicalize_keys(predicted)
 
-    gt_present = {k: v for k, v in ground_truth.items() if _normalize_value(v) is not None}
-    pred_present = {k: v for k, v in predicted.items() if _normalize_value(v) is not None}
+    gt_present = {k: v for k, v in ground_truth.items() if _normalize_field_value(k, v) is not None}
+    pred_present = {k: v for k, v in predicted.items() if _normalize_field_value(k, v) is not None}
     gt_keys, pred_keys = set(gt_present), set(pred_present)
 
     failures: list[FieldFailure] = []
@@ -173,11 +226,11 @@ def compare_fields(document_id: str, ground_truth: dict, predicted: dict) -> tup
     # hallucinated set at the end is exactly whatever's left unconsumed.
     # Iterated in sorted order so the outcome never depends on Python's
     # randomized string-hash seed.
-    extra_candidates = {k: _normalize_value(predicted[k]) for k in sorted(pred_keys - gt_keys)}
+    extra_candidates = {k: _normalize_field_value(k, predicted[k]) for k in sorted(pred_keys - gt_keys)}
 
     for key, gt_value in ground_truth.items():
-        gt_norm = _normalize_value(gt_value)
-        pred_norm = _normalize_value(predicted.get(key)) if key in predicted else None
+        gt_norm = _normalize_field_value(key, gt_value)
+        pred_norm = _normalize_field_value(key, predicted.get(key)) if key in predicted else None
 
         if gt_norm is None:
             if pred_norm is None:
@@ -457,5 +510,197 @@ def build_test_comparison_rows(document_id: str, ground_truth_tests: list[dict],
             "gt_reference_range": None, "pred_reference_range": pred_row.get("reference_range"),
             "status": "extra", "verified": pred_row.get("result_verified", ""), "note": "",
         })
+
+    return rows
+
+
+# Human-readable failure taxonomy for the reviewable export. Kept as data so
+# the Excel sheet, any summary count, and the docs all name a failure the same
+# way — MEASURED shares across the gold set are in the benchmark notes.
+FAILURE_CATEGORIES = {
+    "never_extracted": "Value is on the page but the model returned nothing for it",
+    "wrong_key": "Correct value, but returned under a different field name",
+    "wrong_value_truncated": "Right field, but the value is cut short or has extra text appended",
+    "wrong_value_punctuation": "Right field, value differs only in punctuation/symbols",
+    "wrong_value_different": "Right field, but genuinely different text (a misread)",
+    "hallucinated": "Returned a field that has no counterpart in the ground truth",
+    "test_never_extracted": "Test row is on the page but was not returned",
+    "test_wrong_name": "Test row found, but under a different test name",
+    "test_wrong_result": "Test row matched, but its result value is wrong",
+    "test_wrong_unit": "Test row matched, but its unit is wrong",
+    "test_wrong_reference_range": "Test row matched, but its reference range is wrong",
+    "test_hallucinated": "Returned a test row with no counterpart in the ground truth",
+}
+
+
+def _value_difference_kind(gold: Any, predicted: Any) -> str:
+    """Why two values at the SAME key disagree. Distinguishing these matters:
+    a truncation is usually a labelling-convention clash (the model returning
+    "4 Of 15" where the label is "Page" and the value "4 Of 15"), whereas
+    'different text' is a genuine misread worth fixing."""
+    g, p = str(gold), str(predicted)
+    if p in g or g in p:
+        return "wrong_value_truncated"
+    if _normalize_test_name(g) == _normalize_test_name(p):
+        return "wrong_value_punctuation"
+    return "wrong_value_different"
+
+
+def failure_rows(
+    document_id: str, ground_truth: dict, predicted: dict, field_verified: dict | None = None
+) -> list[dict]:
+    """One row per MISMATCH, showing BOTH sides' key and value plus a
+    categorised reason — the sheet you work from when deciding what to fix.
+
+    Distinct from field_comparison_rows, which emits every field including the
+    correct ones (good for auditing, noisy for triage). Built on the same
+    _canonicalize_keys / _match_test_rows the metrics use, so a failure listed
+    here is exactly a failure the scores counted."""
+    field_verified = _canonicalize_keys(field_verified or {})
+    gold_f = _canonicalize_keys(ground_truth.get("fields", {}))
+    pred_f = _canonicalize_keys(predicted.get("fields", {}))
+    gold_n = {k: _normalize_value(v) for k, v in gold_f.items()}
+    pred_n = {k: _normalize_value(v) for k, v in pred_f.items()}
+
+    rows: list[dict] = []
+
+    def add(category, gt_key=None, gt_value=None, pred_key=None, pred_value=None, detail=""):
+        rows.append({
+            "document_id": document_id,
+            "category": category,
+            "reason": FAILURE_CATEGORIES.get(category, category) + (f" — {detail}" if detail else ""),
+            "gt_key": gt_key, "gt_value": gt_value,
+            "pred_key": pred_key, "pred_value": pred_value,
+            "in_ocr_text": field_verified.get(pred_key, "") if pred_key else "",
+        })
+
+    matched_pred_keys = set()
+    for key, gold_value in gold_f.items():
+        gv = gold_n[key]
+        if gv is None:
+            continue
+        pv = pred_n.get(key)
+        if pv == gv:
+            matched_pred_keys.add(key)
+            continue
+        if pv is not None:
+            matched_pred_keys.add(key)
+            add(_value_difference_kind(gold_value, pred_f[key]), key, gold_value, key, pred_f[key])
+            continue
+        # not at its own key — is the value sitting under a different one?
+        elsewhere = next((pk for pk, pn in pred_n.items() if pn == gv and pk not in gold_n), None)
+        if elsewhere:
+            matched_pred_keys.add(elsewhere)
+            add("wrong_key", key, gold_value, elsewhere, pred_f[elsewhere],
+                detail=f"model called it {elsewhere!r}")
+        else:
+            add("never_extracted", key, gold_value)
+
+    for key, value in pred_f.items():
+        if key in matched_pred_keys or pred_n[key] is None or key in gold_n:
+            continue
+        add("hallucinated", pred_key=key, pred_value=value)
+
+    # ---- test rows ----
+    m = _match_test_rows(ground_truth.get("tests", []), predicted.get("tests", []))
+    gt_by_key, pred_by_key = m["gt_by_key"], m["pred_by_key"]
+    for key in sorted(m["matched"]):
+        g_row, p_row = gt_by_key[key], pred_by_key[key]
+        name = g_row.get("test_name")
+        for column, category in (
+            ("result", "test_wrong_result"),
+            ("unit", "test_wrong_unit"),
+            ("reference_range", "test_wrong_reference_range"),
+        ):
+            if _normalize_value(g_row.get(column)) != _normalize_value(p_row.get(column)):
+                add(category, f"tests.{name}.{column}", g_row.get(column),
+                    f"tests.{p_row.get('test_name')}.{column}", p_row.get(column))
+    for gt_key, pred_key in m["reassigned_to"].items():
+        g_row = gt_by_key[gt_key]
+        add("test_wrong_name", f"tests.{g_row.get('test_name')}", g_row.get("result"),
+            f"tests.{pred_by_key[pred_key].get('test_name')}", pred_by_key[pred_key].get("result"))
+    for key in m["missing"]:
+        g_row = gt_by_key[key]
+        add("test_never_extracted", f"tests.{g_row.get('test_name')}", g_row.get("result"))
+    for key in m["extra"]:
+        p_row = pred_by_key[key]
+        add("test_hallucinated", pred_key=f"tests.{p_row.get('test_name')}", pred_value=p_row.get("result"))
+
+    return rows
+
+
+
+def gt_vs_predicted_rows(
+    document_id: str, ground_truth: dict, predicted: dict
+) -> list[dict]:
+    """Flat side-by-side of EVERY field and test row — hits included — as four
+    columns: ground-truth field/value against predicted field/value.
+
+    Distinct from failure_rows (mismatches only, for triage) and from
+    field_comparison_rows (gold-keyed, carries the scorer's status/notes).
+    This one is the "show me everything, colour the hits green" view, so a
+    reviewer can page through a document and see what was got and what was
+    missed without cross-referencing sheets.
+
+    `hit` drives the row colour. A row appears for every ground-truth value
+    AND every predicted value, so a miss shows an empty predicted side and a
+    hallucination shows an empty ground-truth side."""
+    gold_f = _canonicalize_keys(ground_truth.get("fields", {}))
+    pred_f = _canonicalize_keys(predicted.get("fields", {}))
+    gold_n = {k: _normalize_value(v) for k, v in gold_f.items()}
+    pred_n = {k: _normalize_value(v) for k, v in pred_f.items()}
+
+    rows: list[dict] = []
+
+    def add(gt_field, gt_value, pred_field, pred_value, hit):
+        rows.append({
+            "document_id": document_id,
+            "ground_truth_field": gt_field, "ground_truth_value": gt_value,
+            "predicted_field": pred_field, "predicted_value": pred_value,
+            "hit": "HIT" if hit else "MISS",
+        })
+
+    consumed = set()
+    for key, gold_value in gold_f.items():
+        gv = gold_n[key]
+        if gv is None:
+            continue
+        if pred_n.get(key) == gv:
+            consumed.add(key)
+            add(key, gold_value, key, pred_f[key], True)
+        elif pred_n.get(key) is not None:
+            consumed.add(key)
+            add(key, gold_value, key, pred_f[key], False)
+        else:
+            # value may be sitting under a different predicted key
+            elsewhere = next((pk for pk, pn in pred_n.items() if pn == gv and pk not in gold_n), None)
+            if elsewhere:
+                consumed.add(elsewhere)
+                add(key, gold_value, elsewhere, pred_f[elsewhere], False)
+            else:
+                add(key, gold_value, None, None, False)
+
+    for key, value in pred_f.items():
+        if key in consumed or pred_n[key] is None or key in gold_n:
+            continue
+        add(None, None, key, value, False)
+
+    m = _match_test_rows(ground_truth.get("tests", []), predicted.get("tests", []))
+    gt_by_key, pred_by_key = m["gt_by_key"], m["pred_by_key"]
+    for key in sorted(m["matched"]):
+        g_row, p_row = gt_by_key[key], pred_by_key[key]
+        hit = _normalize_value(g_row.get("result")) == _normalize_value(p_row.get("result"))
+        add(f"tests.{g_row.get('test_name')}", g_row.get("result"),
+            f"tests.{p_row.get('test_name')}", p_row.get("result"), hit)
+    for gt_key, pred_key in m["reassigned_to"].items():
+        g_row = gt_by_key[gt_key]
+        add(f"tests.{g_row.get('test_name')}", g_row.get("result"),
+            f"tests.{pred_by_key[pred_key].get('test_name')}", pred_by_key[pred_key].get("result"), False)
+    for key in m["missing"]:
+        g_row = gt_by_key[key]
+        add(f"tests.{g_row.get('test_name')}", g_row.get("result"), None, None, False)
+    for key in m["extra"]:
+        p_row = pred_by_key[key]
+        add(None, None, f"tests.{p_row.get('test_name')}", p_row.get("result"), False)
 
     return rows

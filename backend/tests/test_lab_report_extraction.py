@@ -1,4 +1,4 @@
-from app.documents.app import extract_lab_report
+from app.documents.app import extract_lab_report, extract_letterhead, merge_letterhead
 
 
 class FakeChain:
@@ -62,10 +62,19 @@ def test_malformed_confidence_values_fall_back_to_uncertain():
     assert result["field_confidence"] == {"a": 0.5, "b": 0.5, "c": 0.5, "d": 0.5}
 
 
+def _without_internals(result: dict) -> dict:
+    """_source_norm is an internal hand-off to merge_letterhead (so the second
+    pass can run the same OCR-verbatim check), stripped before a prediction is
+    saved — not part of the public shape these assertions describe."""
+    return {k: v for k, v in result.items() if not k.startswith("_")}
+
+
 def test_malformed_reply_shapes_never_raise():
     empty = {"fields": {}, "field_confidence": {}, "field_verified": {}, "tests": []}
-    assert extract_lab_report(FakeChain("not a dict at all"), "text") == empty
-    assert extract_lab_report(FakeChain({"fields": ["wrong", "type"], "tests": "also wrong"}), "text") == empty
+    assert _without_internals(extract_lab_report(FakeChain("not a dict at all"), "text")) == empty
+    assert _without_internals(
+        extract_lab_report(FakeChain({"fields": ["wrong", "type"], "tests": "also wrong"}), "text")
+    ) == empty
     # A non-dict entry inside an otherwise valid tests list is skipped, not fatal.
     result = extract_lab_report(FakeChain({"tests": ["junk", {"test_name": "pH", "result": "6.5"}]}), "text")
     assert len(result["tests"]) == 1
@@ -130,3 +139,56 @@ def test_text_only_call_passes_no_image():
     extract_lab_report(chain, "text")
     assert chain.calls[0]["image"] is None
     assert chain.calls[0]["image_media_type"] is None
+
+
+# --------------------------------------------------------------------------- letterhead second pass
+
+def test_letterhead_pass_only_fills_gaps_and_never_overwrites():
+    """The main pass sees the whole page in context, so where the two disagree
+    it is the better source. This pass exists to recover the masthead/footer
+    fields the main call skips (MEASURED: ~180 of 363 misses), not to correct it."""
+    primary = {
+        "fields": {"lab_name": "Acme Labs", "report_number": "R-1"},
+        "field_confidence": {"lab_name": 1.0, "report_number": 1.0},
+        "field_verified": {"lab_name": True, "report_number": True},
+        "tests": [{"test_name": "pH", "result": "6.5"}],
+        "_source_norm": "acmelabs,r-1,cin123,page1of2",
+    }
+    letterhead = {"fields": {
+        "lab_name": "SHOULD NOT WIN",   # already present -> ignored
+        "cin": "CIN123",                # new -> added
+        "page": "Page 1 of 2",          # new -> added
+        "footer": "   ",                # blank -> ignored
+    }}
+    merged = merge_letterhead(primary, letterhead)
+
+    assert merged["fields"]["lab_name"] == "Acme Labs"      # untouched
+    assert merged["fields"]["cin"] == "CIN123"
+    assert merged["fields"]["page"] == "Page 1 of 2"
+    assert "footer" not in merged["fields"]
+    assert merged["letterhead_fields_added"] == 2
+    assert merged["tests"] == primary["tests"]               # tests untouched
+    # added fields get the "no usable confidence" default, and are run through
+    # the same OCR-verbatim check as everything else
+    assert merged["field_confidence"]["cin"] == 0.5
+    assert merged["field_verified"]["cin"] is True
+    assert merged["field_verified"]["page"] is True
+
+
+def test_a_failing_letterhead_pass_cannot_cost_the_document():
+    """It is a bonus pass — a provider error here must leave the main
+    extraction intact rather than fail the whole document."""
+    class _Boom:
+        def generate_json(self, *a, **k):
+            raise RuntimeError("provider exploded")
+
+    assert extract_letterhead(_Boom(), "text") == {"fields": {}}
+    assert extract_letterhead(FakeChain("not a dict"), "text") == {"fields": {}}
+    assert extract_letterhead(FakeChain({"fields": "wrong type"}), "text") == {"fields": {}}
+
+
+def test_merging_an_empty_letterhead_pass_changes_nothing():
+    primary = {"fields": {"a": "1"}, "field_confidence": {"a": 1.0}, "field_verified": {"a": True}, "tests": []}
+    merged = merge_letterhead(primary, {"fields": {}})
+    assert merged["fields"] == {"a": "1"}
+    assert merged["letterhead_fields_added"] == 0

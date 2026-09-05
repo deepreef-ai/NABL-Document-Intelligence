@@ -2,7 +2,14 @@ import json
 
 from app.benchmark import pipeline
 from app.benchmark.accumulator import MetricAccumulator
-from app.benchmark.compare import compare_fields, compare_tests, field_comparison_rows, build_test_comparison_rows
+from app.benchmark.compare import (
+    build_test_comparison_rows,
+    compare_fields,
+    compare_tests,
+    failure_rows,
+    field_comparison_rows,
+    gt_vs_predicted_rows,
+)
 
 
 # --------------------------------------------------------------------------- compare_fields
@@ -651,3 +658,155 @@ def test_a_predicted_test_row_with_no_result_is_not_a_fabricated_value():
     assert counters["test_pred_total"] == 1  # the value-less row isn't a predicted value
     assert counters["result_correct"] == 1
     assert not [f for f in failures if f.error_type == "extra"]
+
+
+# --------------------------------------------------------------------------- failure_rows (triage export)
+
+def test_failure_rows_shows_both_sides_and_categorises_each_mismatch():
+    """The triage sheet has to answer "what did we want, what did we get, and
+    why is that wrong" in one row — including the model's OWN key when it
+    named the field differently."""
+    gt = {
+        "fields": {
+            "report_number": "R-123",        # correct -> not a failure row
+            "client_name": "Acme Labs",      # model called it something else
+            "page": "Page 1 of 3",           # truncated
+            "lab_email": "a@b.com",          # genuine misread
+            "sample_name": "Milk",           # never extracted
+        },
+        "tests": [{"test_name": "pH", "result": "6.5", "unit": "pH"}],
+    }
+    pred = {
+        "fields": {
+            "report_number": "R-123",
+            "customer_name": "Acme Labs",    # alias-folded to client_name
+            "page": "1 of 3",
+            "lab_email": "a@c.com",
+            "invented": "nonsense",
+        },
+        "tests": [{"test_name": "pH", "result": "7.0", "unit": "pH"}],
+    }
+    rows = failure_rows("LR_1", gt, pred)
+    by_cat = {r["category"]: r for r in rows}
+
+    assert "report_number" not in [r["gt_key"] for r in rows]  # correct fields are omitted
+    assert by_cat["wrong_value_truncated"]["gt_value"] == "Page 1 of 3"
+    assert by_cat["wrong_value_truncated"]["pred_value"] == "1 of 3"
+    assert by_cat["wrong_value_different"]["gt_key"] == "lab_email"
+    assert by_cat["never_extracted"]["gt_key"] == "sample_name"
+    assert by_cat["never_extracted"]["pred_value"] is None
+    assert by_cat["hallucinated"]["pred_key"] == "invented"
+    assert by_cat["hallucinated"]["gt_key"] is None
+    assert by_cat["test_wrong_result"]["gt_value"] == "6.5"
+    assert by_cat["test_wrong_result"]["pred_value"] == "7.0"
+    # every row carries a human-readable reason
+    assert all(r["reason"] for r in rows)
+
+
+def test_failure_rows_names_the_key_the_model_actually_used():
+    """A naming disagreement is only actionable if you can see BOTH names."""
+    gt = {"fields": {"start_date_of_analysis": "01-Jan-2024"}, "tests": []}
+    pred = {"fields": {"worksht_dt_tm": "01-Jan-2024"}, "tests": []}
+    rows = failure_rows("LR_1", gt, pred)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["category"] == "wrong_key"
+    assert row["gt_key"] == "start_date_of_analysis"
+    assert row["pred_key"] == "worksht_dt_tm"
+    assert "worksht_dt_tm" in row["reason"]
+
+
+def test_failure_rows_is_empty_for_a_perfect_extraction():
+    gt = {"fields": {"a": "1"}, "tests": [{"test_name": "pH", "result": "6.5"}]}
+    assert failure_rows("LR_1", gt, gt) == []
+
+
+def test_gt_vs_predicted_rows_shows_hits_and_misses_side_by_side():
+    """The review sheet: four columns, one row per field/test, hits included —
+    `hit` drives the row colour, so a miss must show an empty predicted side
+    and a hallucination an empty ground-truth side."""
+    gt = {
+        "fields": {"report_number": "R-1", "sample_name": "Milk", "client_name": "Acme"},
+        "tests": [{"test_name": "pH", "result": "6.5"}, {"test_name": "Fat", "result": "3.2"}],
+    }
+    pred = {
+        "fields": {"report_number": "R-1", "customer_name": "Acme", "invented": "x"},
+        "tests": [{"test_name": "pH", "result": "7.0"}],
+    }
+    rows = gt_vs_predicted_rows("LR_1", gt, pred)
+    by_gt = {r["ground_truth_field"]: r for r in rows if r["ground_truth_field"]}
+
+    assert by_gt["report_number"]["hit"] == "HIT"
+    # alias-folded, so it matches and the predicted side shows the value
+    assert by_gt["client_name"]["hit"] == "HIT"
+    # never extracted -> predicted side empty
+    assert by_gt["sample_name"]["hit"] == "MISS"
+    assert by_gt["sample_name"]["predicted_value"] is None
+    # wrong result -> both sides populated
+    assert by_gt["tests.pH"]["hit"] == "MISS"
+    assert by_gt["tests.pH"]["predicted_value"] == "7.0"
+    # missing test row
+    assert by_gt["tests.Fat"]["predicted_field"] is None
+    # hallucination -> ground-truth side empty
+    hallucinated = [r for r in rows if r["ground_truth_field"] is None]
+    assert {r["predicted_field"] for r in hallucinated} == {"invented"}
+    assert all(r["hit"] == "MISS" for r in hallucinated)
+
+
+def test_gt_vs_predicted_rows_are_all_hits_for_a_perfect_extraction():
+    gt = {"fields": {"a": "1"}, "tests": [{"test_name": "pH", "result": "6.5"}]}
+    rows = gt_vs_predicted_rows("LR_1", gt, gt)
+    assert len(rows) == 2
+    assert all(r["hit"] == "HIT" for r in rows)
+
+
+def test_separator_punctuation_is_ignored_when_comparing_values():
+    """Values are compared on their characters, words and numbers — not on
+    which separator each side used. MEASURED as the most common
+    punctuation-only mismatch: a comma present on one side and absent on the
+    other, across lab_address / lab_website / client_address."""
+    for gold, pred in [
+        ("Guindy, Chennai - 600 032", "Guindy Chennai - 600 032"),
+        ("A - Super 19, T.V.K. Estate", "A - Super 19 | T.V.K. Estate"),
+        ("www.a.in, www.b.in", "www.a.in / www.b.in"),
+    ]:
+        failures, counters = compare_fields("LR_1", {"lab_address": gold}, {"lab_address": pred})
+        assert failures == [], f"{gold!r} vs {pred!r} should match"
+        assert counters["value_correct"] == 1
+
+
+def test_numeric_punctuation_is_still_significant():
+    """"." and "-" carry numeric meaning — dropping them would collapse "6.5"
+    to "65" and a range to a single number, crediting wrong answers."""
+    for gold, pred in [("6.5", "65"), ("40-129", "40129"), ("R-123", "R-124")]:
+        _, counters = compare_fields("LR_1", {"a": gold}, {"a": pred})
+        assert counters["value_correct"] == 0, f"{gold!r} must not match {pred!r}"
+
+
+def test_the_page_label_is_not_part_of_the_page_value():
+    """A page cell prints "Page 4 Of 15": the label is "Page", the value is
+    "4 Of 15", so either form has read it correctly."""
+    for gold, pred in [
+        ("Page 4 Of 15", "4 Of 15"),
+        ("Page : 3 of 7", "3 of 7"),
+        ("Page 1 of 1", "Page 1 of 1"),
+        ("1 of 3", "Page 1 of 3"),
+    ]:
+        failures, counters = compare_fields("LR_1", {"page": gold}, {"page": pred})
+        assert failures == [], f"page {gold!r} vs {pred!r} should match"
+        assert counters["value_correct"] == 1
+    # a genuinely different page number still fails
+    _, counters = compare_fields("LR_1", {"page": "Page 4 of 15"}, {"page": "5 of 15"})
+    assert counters["value_correct"] == 0
+
+
+def test_the_page_rule_is_scoped_to_the_page_field_only():
+    """A general "one value contains the other" rule was measured and
+    rejected — it credited a dropped date and a dropped specialty. So the
+    label-stripping must not leak to other fields."""
+    _, counters = compare_fields(
+        "LR_1",
+        {"coll_date_time": "03/02/2019 09:55:20", "department": "Dept of Lab Medicine: Histopathology"},
+        {"coll_date_time": "09:55:20", "department": "Dept of Lab Medicine"},
+    )
+    assert counters["value_correct"] == 0

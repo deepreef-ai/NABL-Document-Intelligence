@@ -203,3 +203,102 @@ class GeminiProvider(LlmProvider):
             raise
         except (KeyError, IndexError, ValueError) as exc:
             raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response.text[:300]}") from exc
+
+
+class GroqProvider(LlmProvider):
+    """Groq via its OpenAI-compatible chat/completions endpoint.
+
+    Third provider in the fallback chain, after Nova and Gemini — MEASURED
+    2026-09-04: Bedrock was blocked account-wide (IAM: authorizationStatus
+    NOT_AUTHORIZED) while the Gemini free tier allows only 20 requests per
+    day PER MODEL (GenerateRequestsPerDayPerProjectPerModel-FreeTier), which
+    is not enough for one 51-document benchmark pass. Groq's free tier is a
+    separate allowance again, so adding it turns "the run stops" into "the
+    run continues on whatever still has budget".
+
+    `model` must be a VISION model, because documents/app.py sends the page
+    image alongside the OCR text and that pairing is what fixed the
+    redacted-field hallucination. Groq's text-only models silently ignore
+    image parts, which would quietly degrade extraction rather than fail
+    loudly — so the default is a Llama-4 vision model.
+    """
+
+    _ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+    _MAX_ATTEMPTS = 3
+    _RETRY_WAIT_SECONDS = 10.0
+
+    def __init__(self, api_key: str, model: str, timeout: float, name: str = "groq", max_tokens: int = 8192):
+        self.name = name
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+
+    def generate(
+        self,
+        system: str,
+        user_text: str,
+        image: bytes | None = None,
+        image_media_type: str | None = None,
+        want_json: bool = False,
+    ) -> str:
+        # OpenAI content-parts shape: text plus an optional inline data: URL.
+        content: list[dict] = [{"type": "text", "text": user_text}]
+        if image is not None:
+            encoded = base64.b64encode(image).decode("ascii")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_media_type or 'image/png'};base64,{encoded}"},
+            })
+
+        payload: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0.2,
+            "max_tokens": self.max_tokens,
+        }
+        if want_json:
+            payload["response_format"] = {"type": "json_object"}
+
+        last: LlmProviderError | None = None
+        for attempt in range(self._MAX_ATTEMPTS):
+            try:
+                # Bearer header, never the URL — see classify_http_error.
+                response = httpx.post(
+                    self._ENDPOINT,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    timeout=self.timeout,
+                )
+            except httpx.TimeoutException as exc:
+                raise LlmTimeoutError(f"{self.name} timed out after {self.timeout}s") from exc
+            except httpx.HTTPError as exc:
+                raise LlmProviderError(f"{self.name} request failed: {type(exc).__name__}") from exc
+
+            if response.status_code == 200:
+                break
+            error = classify_http_error(self.name, response.status_code, response.text[:400])
+            # Same reasoning as GeminiProvider: absorb a transient spike here
+            # rather than let it cool down the whole provider mid-batch.
+            if not isinstance(error, LlmRateLimitError) or attempt == self._MAX_ATTEMPTS - 1:
+                raise error
+            last = error
+            time.sleep(self._RETRY_WAIT_SECONDS * (attempt + 1))
+        else:  # pragma: no cover - loop always breaks or raises
+            raise last or LlmProviderError(f"{self.name} exhausted retries")
+
+        try:
+            choice = response.json()["choices"][0]
+            text = choice.get("message", {}).get("content") or ""
+            if not text:
+                raise LlmProviderError(
+                    f"{self.name} returned no text (finish_reason={choice.get('finish_reason')!r})"
+                )
+            return text
+        except LlmProviderError:
+            raise
+        except (KeyError, IndexError, ValueError) as exc:
+            raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response.text[:300]}") from exc

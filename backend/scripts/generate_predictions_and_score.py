@@ -41,16 +41,25 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # backend/ on sys.path
 
 from app.benchmark.accumulator import MetricAccumulator  # noqa: E402
-from app.benchmark.compare import build_test_comparison_rows, compare_fields, compare_tests, field_comparison_rows  # noqa: E402
+from app.benchmark.compare import (  # noqa: E402
+    FAILURE_CATEGORIES,
+    build_test_comparison_rows,
+    compare_fields,
+    compare_tests,
+    failure_rows,
+    field_comparison_rows,
+    gt_vs_predicted_rows,
+)
 from app.config import get_settings  # noqa: E402
 from app.dataset_normalization.text_repair import repair_glued_words  # noqa: E402
 from app.documents import local_ocr, pdf_utils  # noqa: E402
-from app.documents.app import extract_lab_report  # noqa: E402
+from app.documents.app import extract_lab_report, extract_letterhead, merge_letterhead  # noqa: E402
 from app.llm.chain import LlmChain  # noqa: E402
 from app.llm.factory import _build_chain  # noqa: E402
 
@@ -115,13 +124,24 @@ def _build_message_content(source_path: Path) -> tuple[str, bytes | None, str | 
     return user_text, None, None
 
 
-def _predict_one(chain: LlmChain, source_path: Path) -> dict:
+def _predict_one(chain: LlmChain, source_path: Path, letterhead_pass: bool = True) -> dict:
     user_text, image_bytes, image_media_type = _build_message_content(source_path)
     result = extract_lab_report(chain, user_text, image=image_bytes, image_media_type=image_media_type)
+    if letterhead_pass:
+        # Second, focused call for the masthead/footer block — see
+        # documents/app.py's extract_letterhead for why one call cannot do
+        # both. Additive: it only fills fields the main pass left empty, and
+        # it swallows its own failures so it can never cost a document.
+        result = merge_letterhead(
+            result,
+            extract_letterhead(chain, user_text, image=image_bytes, image_media_type=image_media_type),
+        )
+    # internal only - not part of the saved prediction shape
+    result.pop("_source_norm", None)
     return {**result, "pipeline_error": None}
 
 
-def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir: Path, chain: LlmChain, force: bool = False) -> dict:
+def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir: Path, chain: LlmChain, force: bool = False, letterhead_pass: bool = True) -> dict:
     predictions_dir.mkdir(parents=True, exist_ok=True)
     stats = {"total": 0, "predicted": 0, "skipped": 0, "failed": 0, "failures": []}
 
@@ -155,7 +175,7 @@ def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir:
                 print(f"  (all providers cooling down, waiting {wait:.0f}s before {stem})", flush=True)
                 time.sleep(wait + 1)
             try:
-                prediction = _predict_one(chain, source_path)
+                prediction = _predict_one(chain, source_path, letterhead_pass=letterhead_pass)
             except Exception as exc:  # noqa: BLE001 — one bad document must never stop the batch
                 prediction = {"fields": {}, "tests": [], "pipeline_error": f"{type(exc).__name__}: {exc}"}
 
@@ -169,11 +189,13 @@ def generate_predictions(labelled_dir: Path, dataset_dir: Path, predictions_dir:
     return stats
 
 
-def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict], list[dict], list[dict]]:
+def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict], list[dict], list[dict], list[dict], list[dict]]:
     overall = MetricAccumulator()
     rows: list[dict] = []
     all_field_rows: list[dict] = []
     all_test_rows: list[dict] = []
+    all_failure_rows: list[dict] = []
+    all_gt_vs_pred_rows: list[dict] = []
 
     for label_path in sorted(labelled_dir.glob("*/*.json")):
         stem = label_path.stem
@@ -207,8 +229,14 @@ def score(labelled_dir: Path, predictions_dir: Path) -> tuple[dict, list[dict], 
         })
         all_field_rows.extend(field_comparison_rows(stem, gt_fields, pred_fields, prediction.get("field_verified")))
         all_test_rows.extend(build_test_comparison_rows(stem, gt_tests, pred_tests))
+        # Only meaningful where extraction actually ran: for a failed
+        # document every single field would list as "never_extracted",
+        # burying the real mismatches under hundreds of rows.
+        if extraction_ok:
+            all_failure_rows.extend(failure_rows(stem, ground_truth, prediction, prediction.get("field_verified")))
+            all_gt_vs_pred_rows.extend(gt_vs_predicted_rows(stem, ground_truth, prediction))
 
-    return overall.finalize(), rows, all_field_rows, all_test_rows
+    return overall.finalize(), rows, all_field_rows, all_test_rows, all_failure_rows, all_gt_vs_pred_rows
 
 
 def write_results(summary: dict, rows: list[dict], output_dir: Path) -> None:
@@ -228,6 +256,17 @@ def write_results(summary: dict, rows: list[dict], output_dir: Path) -> None:
 _STATUS_COLORS = {
     "correct": "C6EFCE", "missing": "FFEB9C", "wrong_value": "FFC7CE",
     "wrong_key": "FFC7CE", "wrong_unit": "FFC7CE", "extra": "E4C7FF",
+    # Failures sheet categories. Amber = the model returned nothing (safe:
+    # a visibly empty box). Red = it returned something WRONG (dangerous
+    # for auto-fill). Purple = it invented a field outright.
+    "never_extracted": "FFEB9C", "test_never_extracted": "FFEB9C",
+    "wrong_key": "FFD9B3", "test_wrong_name": "FFD9B3",
+    "wrong_value_truncated": "FFE0E0", "wrong_value_punctuation": "FFF0F0",
+    "wrong_value_different": "FFC7CE", "test_wrong_result": "FFC7CE",
+    "test_wrong_unit": "FFD7DC", "test_wrong_reference_range": "FFD7DC",
+    "hallucinated": "E4C7FF", "test_hallucinated": "E4C7FF",
+    # "GT vs Predicted" sheet: whole row green on a hit, red on a miss.
+    "HIT": "C6EFCE", "MISS": "FFC7CE",
 }
 
 
@@ -242,7 +281,7 @@ def _cell_value(value):
     return value
 
 
-def _write_sheet(ws, rows: list[dict], status_key: str = "status") -> None:
+def _write_sheet(ws, rows: list[dict], status_key: str = "status", color_whole_row: bool = False) -> None:
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
@@ -263,7 +302,12 @@ def _write_sheet(ws, rows: list[dict], status_key: str = "status") -> None:
         if status_col:
             color = _STATUS_COLORS.get(row.get(status_key))
             if color:
-                ws.cell(ws.max_row, status_col).fill = PatternFill("solid", fgColor=color)
+                if color_whole_row:
+                    fill = PatternFill("solid", fgColor=color)
+                    for c in range(1, len(columns) + 1):
+                        ws.cell(ws.max_row, c).fill = fill
+                else:
+                    ws.cell(ws.max_row, status_col).fill = PatternFill("solid", fgColor=color)
 
     for i, column in enumerate(columns, start=1):
         width = max(len(str(column)), *(len(str(r.get(column, ""))) for r in rows[:200]))
@@ -271,7 +315,8 @@ def _write_sheet(ws, rows: list[dict], status_key: str = "status") -> None:
 
 
 def write_excel_workbook(
-    summary: dict, rows: list[dict], field_rows: list[dict], test_rows: list[dict], output_dir: Path
+    summary: dict, rows: list[dict], field_rows: list[dict], test_rows: list[dict],
+    failures: list[dict], gt_vs_pred: list[dict], output_dir: Path
 ) -> Path:
     """A human-reviewable comparison workbook alongside summary.json/
     per_document.csv — one row per ground-truth field/test (correct or
@@ -311,6 +356,26 @@ def write_excel_workbook(
 
     _write_sheet(wb.create_sheet("Fields"), field_rows)
     _write_sheet(wb.create_sheet("Tests"), test_rows)
+    # Triage sheet: mismatches only, both sides side by side, categorised.
+    _write_sheet(wb.create_sheet("Failures"), failures, status_key="category")
+    # Every field and test row, hits included — whole row green on a hit,
+    # red on a miss, so a document can be reviewed by eye.
+    _write_sheet(wb.create_sheet("GT vs Predicted"), gt_vs_pred, status_key="hit", color_whole_row=True)
+
+    # ...and a count per category, so the shape of the problem is visible
+    # without pivoting the Failures sheet by hand.
+    counts = Counter(f["category"] for f in failures)
+    breakdown = wb.create_sheet("Failure summary")
+    breakdown.append(["category", "count", "share", "what it means"])
+    for cell in breakdown[1]:
+        cell.font = Font(bold=True)
+    total = sum(counts.values()) or 1
+    for category, n in counts.most_common():
+        breakdown.append([category, n, round(n / total, 4), FAILURE_CATEGORIES.get(category, "")])
+    breakdown.append([])
+    breakdown.append(["TOTAL", sum(counts.values())])
+    for col, width in (("A", 30), ("B", 8), ("C", 8), ("D", 74)):
+        breakdown.column_dimensions[col].width = width
 
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / "comparison.xlsx"
@@ -333,6 +398,12 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Re-run the LLM call even for already-predicted documents.")
     parser.add_argument("--predict-only", action="store_true")
     parser.add_argument("--score-only", action="store_true")
+    parser.add_argument(
+        "--no-letterhead-pass", action="store_true",
+        help="Skip the focused second call for the masthead/footer block. Halves the "
+             "requests per document (useful against a tight free-tier quota) at the "
+             "cost of the letterhead fields it recovers.",
+    )
     parser.add_argument(
         "--providers", default=None,
         help="Override LLM_PROVIDER_ORDER for this run, e.g. 'gemini' or 'nova,gemini'. "
@@ -382,7 +453,10 @@ def main() -> int:
     print(f"Output:           {output_dir}")
 
     if not args.score_only:
-        stats = generate_predictions(labelled_dir, dataset_dir, predictions_dir, chain, force=args.force)
+        stats = generate_predictions(
+            labelled_dir, dataset_dir, predictions_dir, chain,
+            force=args.force, letterhead_pass=not args.no_letterhead_pass,
+        )
         print()
         print("=== Prediction Summary ===")
         print(f"Total documents: {stats['total']}")
@@ -393,9 +467,11 @@ def main() -> int:
             print(f"  {name}: {reason}")
 
     if not args.predict_only:
-        summary, rows, field_rows, test_rows = score(labelled_dir, predictions_dir)
+        summary, rows, field_rows, test_rows, failures, gt_vs_pred = score(labelled_dir, predictions_dir)
         write_results(summary, rows, output_dir)
-        workbook_path = write_excel_workbook(summary, rows, field_rows, test_rows, output_dir)
+        workbook_path = write_excel_workbook(
+            summary, rows, field_rows, test_rows, failures, gt_vs_pred, output_dir,
+        )
         print()
         print("=== Score Summary ===")
         for key, value in summary.items():

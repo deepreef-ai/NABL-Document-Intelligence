@@ -2,22 +2,57 @@ from functools import lru_cache
 
 from app.config import Settings, get_settings
 from app.llm.chain import LlmChain
-from app.llm.providers import GeminiProvider, NovaProvider
+from app.llm.providers import GeminiProvider, GroqProvider, NovaProvider
 
-# Each builder returns None when that provider isn't configured, so an
-# unconfigured name in the order string is skipped rather than producing a
-# provider that fails on every call. Nova is gated on nova_model (an
-# inference-profile ID) rather than an API key because it authenticates via
-# the ambient AWS credential chain (see NovaProvider's docstring); Gemini is
-# a normal keyed REST provider, so it's gated on its key.
-_BUILDERS = {
-    "nova": lambda s: NovaProvider(
-        s.nova_model, s.nova_region, s.llm_timeout_seconds, max_tokens=s.nova_max_tokens,
-    ) if s.nova_model else None,
-    "gemini": lambda s: GeminiProvider(
-        s.gemini_api_key, s.gemini_model, s.llm_timeout_seconds, max_tokens=s.gemini_max_tokens,
-    ) if s.gemini_api_key else None,
-}
+# Each builder returns the providers for one NAME in the order string, and an
+# empty list when that provider isn't configured — so an unconfigured name is
+# skipped rather than producing a provider that fails on every call.
+#
+# A builder returns a LIST because one name can expand to several providers:
+# Gemini and Groq free-tier quotas are per-key (MEASURED 2026-09-04: Gemini
+# allows 20 requests/day per project per model), so several keys are several
+# allowances. Each key becomes its own link — gemini, gemini-2, gemini-3 —
+# and LlmChain moves to the next when one is exhausted, which is exactly the
+# fallthrough it already does for a failing provider.
+#
+# Nova is gated on nova_model (an inference-profile ID) rather than an API key
+# because it authenticates via the ambient AWS credential chain (see
+# NovaProvider's docstring); the others are normal keyed REST providers.
+
+
+def _numbered(base: str, index: int) -> str:
+    """First key keeps the plain name so logs/metrics stay recognisable when
+    only one key is configured (the common case)."""
+    return base if index == 0 else f"{base}-{index + 1}"
+
+
+def _nova(s: Settings) -> list:
+    if not s.nova_model:
+        return []
+    return [NovaProvider(s.nova_model, s.nova_region, s.llm_timeout_seconds, max_tokens=s.nova_max_tokens)]
+
+
+def _gemini(s: Settings) -> list:
+    return [
+        GeminiProvider(
+            key, s.gemini_model, s.llm_timeout_seconds,
+            name=_numbered("gemini", i), max_tokens=s.gemini_max_tokens,
+        )
+        for i, key in enumerate(s.gemini_api_key_list)
+    ]
+
+
+def _groq(s: Settings) -> list:
+    return [
+        GroqProvider(
+            key, s.groq_model, s.llm_timeout_seconds,
+            name=_numbered("groq", i), max_tokens=s.groq_max_tokens,
+        )
+        for i, key in enumerate(s.groq_api_key_list)
+    ]
+
+
+_BUILDERS = {"nova": _nova, "gemini": _gemini, "groq": _groq}
 
 
 def _build_chain(settings: Settings, order: str) -> LlmChain:
@@ -25,9 +60,8 @@ def _build_chain(settings: Settings, order: str) -> LlmChain:
     providers = []
     for name in names:
         builder = _BUILDERS.get(name)
-        provider = builder(settings) if builder else None
-        if provider is not None:
-            providers.append(provider)
+        if builder:
+            providers.extend(builder(settings))
     return LlmChain(providers)
 
 

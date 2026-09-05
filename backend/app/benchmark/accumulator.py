@@ -9,6 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def _f1(precision: float | None, recall: float | None) -> float | None:
+    """Harmonic mean, None when either side is undefined (no data)."""
+    if precision is None or recall is None:
+        return None
+    return round(2 * precision * recall / (precision + recall), 4) if (precision + recall) > 0 else 0.0
+
+
 @dataclass
 class MetricAccumulator:
     document_count: int = 0

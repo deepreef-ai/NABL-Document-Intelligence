@@ -94,13 +94,118 @@ SYSTEM_PROMPT = (
     "- 'tests' contains every row of every results table: analyte/parameter name, observed value, unit, "
     "reference range, method, sample ID if present.\n"
     "- If a column is missing (e.g., no units), set that key to null.\n"
-    "- If there are no tabular results, set 'tests' to an empty list [].\n\n"
+    "- If there are no tabular results, set 'tests' to an empty list [].\n"
+    "- DATES OR SAMPLES AS COLUMNS: if the table has one row per analyte and\n"
+    "  several DATE (or sample) columns of results — a trend/comparison table —\n"
+    "  emit ONE ROW PER CELL, not one per analyte. 12 analytes x 5 date columns\n"
+    "  is 60 rows. Put the column's date/sample heading in 'sample_id', and\n"
+    "  repeat the shared 'unit'/'reference_range' on every row from that\n"
+    "  analyte. Returning only the newest column silently drops most of the\n"
+    "  table — MEASURED: one such report lost 48 of its 60 result rows.\n\n"
 
     "QUALITY & SAFETY:\n"
     "- Prioritize accuracy over completeness. It is better to omit a field than to hallucinate.\n"
     "- If OCR and image disagree, trust the image.\n"
     "- Do not include any text outside the JSON object."
 )
+
+
+LETTERHEAD_PROMPT = (
+    "You extract ONLY the lab-identity and page-furniture fields from a laboratory "
+    "test report. Ignore the results table entirely — a separate pass handles it.\n\n"
+
+    "Look at the very TOP of the page (the masthead/letterhead) and the very BOTTOM "
+    "(the footer strip and signature block). This text is often small, faint, grey, "
+    "or set inside a logo — read it anyway. These are the fields most often missed, "
+    "which is the whole reason this pass exists.\n\n"
+
+    "Extract every one of these that appears anywhere on the page:\n"
+    "  lab_name, lab_address, lab_phone, lab_fax, lab_email, lab_website,\n"
+    "  laboratory_accreditation_no (often beside a NABL mark or QR code, e.g. \"TC-6820\"),\n"
+    "  cin, udyam_no, laboratories_at, testing_lab_address,\n"
+    "  document_title (e.g. \"TEST REPORT\", \"CERTIFICATE OF ANALYSIS\"),\n"
+    "  page (exactly as printed, e.g. \"Page 1 of 2\"),\n"
+    "  footer (the disclaimer sentence(s) at the bottom, verbatim),\n"
+    "  signatory_name, signatory_title, quality_manager, reviewed_by, approved_by\n"
+    "    (a name printed inside a rubber stamp counts; an illegible handwritten\n"
+    "     signature with no printed name does not, but its printed TITLE does),\n"
+    "  copyright, limits_note, note, conformity_statement.\n\n"
+
+    "RULES:\n"
+    "- Copy values exactly as written (punctuation, case, spacing, separators).\n"
+    "- Omit any field you cannot actually see. Never return a label's own text as "
+    "its value (no \"lab_name\": \"LAB NAME\").\n"
+    "- A label whose value is blank or redacted is omitted entirely.\n"
+    "- Invent a snake_case key from the page's own label only for a lab-identity or "
+    "page-furniture field genuinely not listed above.\n\n"
+
+    "Respond with ONLY this JSON, no other text:\n"
+    "{\"fields\": {\"<snake_case_key>\": \"<value exactly as written>\", \"...\": \"...\"}}"
+)
+
+
+def extract_letterhead(
+    chain: LlmChain, text: str, image: bytes | None = None, image_media_type: str | None = None
+) -> dict:
+    """Second, FOCUSED pass for the lab letterhead and footer block.
+
+    MEASURED 2026-09-04 on the 48-document gold run: ~180 of the 363
+    never-extracted fields were exactly these — laboratory_accreditation_no
+    (19 documents), lab_phone (19), lab_email (19), lab_website (19), cin
+    (17), udyam_no (17), laboratories_at (17), footer (21), lab_address (13),
+    lab_name (11), page (10). SYSTEM_PROMPT already carries an explicit
+    whole-page coverage checklist naming the letterhead and footer, and the
+    model skipped them anyway: one call asked to transcribe a 60-row results
+    table AND comb the masthead loses the masthead, because the table
+    dominates its attention.
+
+    So this pass asks for nothing else. Returns {"fields": {...}} only — no
+    confidence, no tests — and never raises: it is additive, so a failure here
+    must leave the main extraction untouched rather than sink the document.
+    """
+    try:
+        result = chain.generate_json(LETTERHEAD_PROMPT, text, image=image, image_media_type=image_media_type)
+    except Exception:  # noqa: BLE001 — a bonus pass must never fail the document
+        return {"fields": {}}
+    if not isinstance(result, dict):
+        return {"fields": {}}
+    fields = result.get("fields")
+    return {"fields": fields if isinstance(fields, dict) else {}}
+
+
+def merge_letterhead(primary: dict, letterhead: dict) -> dict:
+    """Folds the letterhead pass into the main result, ADDITIVELY: a field the
+    main pass already returned is never overwritten.
+
+    Deliberately conservative. The main pass sees the whole page in context,
+    so where the two disagree it is the better source; this pass exists to
+    fill gaps, and letting it overwrite would trade a measured recall gain for
+    an unmeasured precision risk. Added fields get confidence 0.5 — "the model
+    gave a value but no usable confidence", the same default
+    _normalize_confidence applies elsewhere — and are run through the same
+    OCR-verbatim check as everything else.
+    """
+    merged = dict(primary)
+    fields = dict(primary.get("fields") or {})
+    confidence = dict(primary.get("field_confidence") or {})
+    verified = dict(primary.get("field_verified") or {})
+    source_norm = primary.get("_source_norm") or ""
+
+    added = 0
+    for key, value in (letterhead.get("fields") or {}).items():
+        if key in fields or not isinstance(value, str) or not value.strip():
+            continue
+        fields[key] = value
+        confidence[key] = 0.5
+        if source_norm:
+            verified[key] = _verified_against_source(value, source_norm)
+        added += 1
+
+    merged["fields"] = fields
+    merged["field_confidence"] = confidence
+    merged["field_verified"] = verified
+    merged["letterhead_fields_added"] = added
+    return merged
 
 
 def _normalize_confidence(value) -> float:
@@ -221,4 +326,12 @@ def extract_lab_report(chain: LlmChain, text: str, image: bytes | None = None, i
             row["result_verified"] = _verified_against_source(row.get("result"), source_norm)
         tests.append(row)
 
-    return {"fields": fields, "field_confidence": field_confidence, "field_verified": field_verified, "tests": tests}
+    return {
+        "fields": fields,
+        "field_confidence": field_confidence,
+        "field_verified": field_verified,
+        "tests": tests,
+        # Kept so merge_letterhead can run the same OCR-verbatim check on
+        # anything the second pass adds; stripped before the result is saved.
+        "_source_norm": source_norm,
+    }

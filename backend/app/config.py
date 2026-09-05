@@ -24,9 +24,31 @@ class Settings(BaseSettings):
     # class's docstring for the 2026-09 account-wide block that motivated it).
     # Blank key = provider skipped, exactly like a blank nova_model, so leaving
     # this unset keeps behaviour identical to before it existed.
+    # COMMA-SEPARATED for multiple keys. Gemini's free-tier quota is
+    # per-PROJECT-per-model (MEASURED 2026-09-04:
+    # GenerateRequestsPerDayPerProjectPerModel-FreeTier = 20 requests/day),
+    # so a key from a second project is a second allowance — each key
+    # becomes its own link in the fallback chain (gemini, gemini-2, ...) and
+    # the chain moves to the next one when a key is exhausted.
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
     gemini_max_tokens: int = 8192
+
+    # Groq (llm/providers.py's GroqProvider) — third fallback, a separate
+    # free-tier allowance again. MUST be a VISION model: the extraction
+    # pipeline sends the page image with the OCR text, and Groq's text-only
+    # models ignore image parts silently rather than erroring.
+    groq_api_key: str = ""
+    groq_model: str = "qwen/qwen3.8-27b"
+    groq_max_tokens: int = 8192
+
+    @property
+    def gemini_api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.gemini_api_key.split(",") if k.strip()]
+
+    @property
+    def groq_api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.groq_api_key.split(",") if k.strip()]
 
     # Comma-separated, tried in order, first success wins (llm/chain.py). Put
     # "nova,gemini" here to fall back automatically; "gemini" alone to force it.
