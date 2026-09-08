@@ -17,8 +17,9 @@ from app.llm.json_utils import parse_json_object
 log = logging.getLogger(__name__)
 
 _NOT_CONFIGURED_MESSAGE = (
-    "No LLM provider is configured — set at least one of GEMINI_API_KEY, "
-    "GROQ_API_KEY, HUGGINGFACE_API_KEY in backend/.env."
+    "No LLM provider is configured — set NOVA_MODEL in backend/.env and make "
+    "sure AWS credentials are available in the environment (see "
+    "llm/providers.py's NovaProvider)."
 )
 
 # 429 / timeout backoff: doubles each consecutive failure, capped. Kept as
@@ -104,6 +105,26 @@ class LlmChain:
             status.disable(type(exc).__name__)
             log.error("llm chain: disabling %s (%s)", provider.name, exc)
         # LlmBadRequestError and anything else: no state change.
+
+    def seconds_until_available(self) -> float | None:
+        """How long until SOME provider is usable again, for a caller that can
+        afford to wait. None means one is usable right now; math.inf means
+        every provider is permanently disabled (bad key, dead billing) and
+        waiting will never help.
+
+        This exists for BATCH callers. The chain itself deliberately fails
+        fast — a web request must not block behind a 5-minute cooldown — but
+        MEASURED 2026-09-04: a batch benchmark run lost 37 of 51 documents to
+        "cooling down for Ns more" without a single API attempt, because one
+        rate-limit cascade put the only provider in backoff and every
+        subsequent document inherited it. A batch job should sleep and
+        continue instead of discarding the work."""
+        if not self.providers:
+            return math.inf
+        now = time.monotonic()
+        waits = [max(0.0, self._status[p.name].available_at - now) for p in self.providers]
+        soonest = min(waits)
+        return None if soonest <= 0 else soonest
 
     def _usable_providers(self) -> tuple[list[LlmProvider], list[str]]:
         now = time.monotonic()

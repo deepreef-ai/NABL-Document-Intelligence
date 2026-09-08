@@ -76,12 +76,11 @@ def classify_image(image_bytes: bytes, media_type: str) -> tuple[str, float]:
 
 
 def _parse_classification(result: dict) -> tuple[str, float]:
-    """A capable cloud model reliably includes both keys; a small local
-    model under Ollama's generic `format: json` grammar (which only enforces
-    "this is valid JSON", not a specific schema) can drop one — observed in
-    practice with qwen2.5:3b omitting "confidence". A missing doc_type is a
-    genuine failure (nothing to classify with); a missing confidence just
-    means "uncertain," not "the call must be retried elsewhere.\""""
+    """Nova reliably includes both keys, but a JSON-mode reply is never a
+    guaranteed schema match — defended against here rather than assumed
+    away. A missing doc_type is a genuine failure (nothing to classify
+    with); a missing confidence just means "uncertain," not "the call must
+    be retried elsewhere.\""""
     doc_type = result.get("doc_type")
     if not doc_type:
         raise LlmProviderError(f"classifier: response had no doc_type: {result}")

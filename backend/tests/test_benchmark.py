@@ -2,7 +2,14 @@ import json
 
 from app.benchmark import pipeline
 from app.benchmark.accumulator import MetricAccumulator
-from app.benchmark.compare import compare_fields, compare_tests
+from app.benchmark.compare import (
+    build_test_comparison_rows,
+    compare_fields,
+    compare_tests,
+    failure_rows,
+    field_comparison_rows,
+    gt_vs_predicted_rows,
+)
 
 
 # --------------------------------------------------------------------------- compare_fields
@@ -23,6 +30,32 @@ def test_compare_fields_detects_wrong_value():
     assert len(failures) == 1
     assert failures[0].error_type == "wrong_value"
     assert counters["field_correct"] == 0
+
+
+def test_compare_fields_ignores_whitespace_only_formatting_differences():
+    """"40 - 129" and "40-129" are the same value — OCR is inconsistent about
+    exactly where it puts a space around a dash, or drops one between words
+    entirely ("02Nov2020" vs "02 Nov 2020"). That's not a real extraction
+    error and must not score as one."""
+    gt = {
+        "reference_range": "40 - 129",
+        "date": "02 Nov 2020",
+    }
+    pred = {
+        "reference_range": "40-129",
+        "date": "02Nov2020",
+    }
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert failures == []
+    assert counters["field_correct"] == 2
+
+
+def test_compare_fields_treats_dash_variants_as_equivalent():
+    gt = {"range": "40–12"}  # en dash
+    pred = {"range": "40-12"}  # plain hyphen
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert failures == []
+    assert counters["field_correct"] == 1
 
 
 def test_compare_fields_detects_missing_value():
@@ -98,6 +131,42 @@ def test_compare_fields_treats_placeholder_text_as_null():
     assert counters["field_correct"] == 1
 
 
+def test_equivalent_field_names_are_not_scored_as_errors():
+    """The model names keys after the page's own wording and the
+    hand-written ground truth is itself inconsistent (lab_name in 14
+    documents, laboratory_name in 4) — a pure naming disagreement must not
+    score as BOTH a missing field and a hallucinated one."""
+    # NB: not "none" as a value — compare.py correctly reads that as a
+    # placeholder meaning "no value", which wouldn't exercise this at all.
+    gt = {"laboratory_name": "Acme Labs", "remark": "sample intact", "received": "01-Jan-2024"}
+    pred = {"lab_name": "Acme Labs", "remarks": "sample intact", "date_of_receipt": "01-Jan-2024"}
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert failures == []
+    assert counters["value_correct"] == 3
+    assert counters["extra"] == 0
+    assert counters["missing"] == 0
+
+
+def test_a_qualifier_that_changes_meaning_is_not_treated_as_an_alias():
+    """testing_lab_address is a different lab's address than lab_address —
+    folding those together would credit a genuinely wrong answer."""
+    failures, counters = compare_fields(
+        "LR_1", {"lab_address": "1 Main St"}, {"testing_lab_address": "1 Main St"},
+    )
+    assert counters["value_correct"] == 0
+    assert any(f.error_type in ("missing", "wrong_key") for f in failures)
+
+
+def test_aliasing_never_overwrites_a_key_the_document_already_has():
+    """A document carrying both spellings has two real entries; renaming
+    one onto the other would silently discard a value."""
+    gt = {"lab_name": "Acme Labs", "laboratory_name": "Acme Labs Pvt Ltd"}
+    pred = {"lab_name": "Acme Labs", "laboratory_name": "Acme Labs Pvt Ltd"}
+    failures, counters = compare_fields("LR_1", gt, pred)
+    assert counters["field_total"] == 2  # both survived the fold
+    assert counters["value_correct"] == 2
+
+
 # --------------------------------------------------------------------------- compare_tests
 
 def test_compare_tests_matches_by_normalized_test_name_and_scores_result_unit_range():
@@ -162,6 +231,152 @@ def test_compare_tests_does_not_pair_unrelated_rows_sharing_a_boilerplate_result
     assert counters["extra"] == 2
 
 
+def test_compare_tests_disambiguates_repeated_test_names_by_sample_id():
+    """The same analyte name legitimately repeats across multiple samples in
+    one report (e.g. "pH" per sample point in a water panel) — sample_id is
+    the column the schema carries to tell those rows apart. Matching by
+    test_name alone would collapse both ground-truth rows onto one key,
+    silently losing one of them from scoring entirely."""
+    gt = [
+        {"test_name": "pH", "sample_id": "S1", "result": "6.5", "unit": None, "reference_range": None},
+        {"test_name": "pH", "sample_id": "S2", "result": "7.2", "unit": None, "reference_range": None},
+    ]
+    pred = [
+        {"test_name": "pH", "sample_id": "S1", "result": "6.5", "unit": None, "reference_range": None},
+        {"test_name": "pH", "sample_id": "S2", "result": "7.0", "unit": None, "reference_range": None},  # wrong
+    ]
+    failures, counters = compare_tests("LR_1", gt, pred)
+    assert counters["test_gt_total"] == 2
+    assert counters["test_matched"] == 2
+    assert counters["result_correct"] == 1
+    assert sum(1 for f in failures if f.error_type == "wrong_value") == 1
+
+
+def test_a_ground_truth_only_sample_id_does_not_break_an_otherwise_clean_match():
+    """Ground truth often carries a sample_id (specimen type, sub-report no.)
+    for a test whose NAME is already unique, and the model has no reason to
+    reproduce that identifier. sample_id is a tie-breaker, not part of the
+    row's identity — so this must score as one correct row, not as both a
+    missing row and a hallucinated one."""
+    gt = [{"test_name": "Glucose", "sample_id": "BLOOD", "result": "86", "unit": "mg/dl", "reference_range": "74-100"}]
+    pred = [{"test_name": "Glucose", "result": "86", "unit": "mg/dl", "reference_range": "74-100"}]
+    failures, counters = compare_tests("LR_1", gt, pred)
+    assert failures == []
+    assert counters["test_matched"] == 1
+    assert counters["result_correct"] == 1
+    assert counters["extra"] == 0
+
+
+def test_the_tie_breaker_still_applies_when_a_name_genuinely_repeats():
+    """The name-only fallback must NOT fire when the name is ambiguous —
+    that is exactly the multi-sample case sample_id exists to resolve, and
+    pairing arbitrarily there would silently cross-match samples."""
+    gt = [
+        {"test_name": "pH", "sample_id": "S1", "result": "6.5"},
+        {"test_name": "pH", "sample_id": "S2", "result": "7.2"},
+    ]
+    pred = [  # correct values, but attributed to the wrong samples
+        {"test_name": "pH", "sample_id": "S1", "result": "7.2"},
+        {"test_name": "pH", "sample_id": "S2", "result": "6.5"},
+    ]
+    _, counters = compare_tests("LR_1", gt, pred)
+    assert counters["test_matched"] == 2
+    assert counters["result_correct"] == 0  # both cross-attributed, neither credited
+
+
+def test_compare_tests_falls_back_to_name_only_matching_without_sample_id():
+    """Most documents have no sample_id at all — matching must still work
+    purely by test_name in that case, same as before this disambiguation
+    was added."""
+    gt = [{"test_name": "Hemoglobin", "result": "13.5", "unit": "g/dL", "reference_range": "13-17"}]
+    pred = [{"test_name": "hemoglobin", "result": "13.5", "unit": "g/dL", "reference_range": "13-17"}]
+    failures, counters = compare_tests("LR_1", gt, pred)
+    assert failures == []
+    assert counters["test_matched"] == 1
+
+
+# --------------------------------------------------------------------------- comparison row exports (Excel)
+
+def test_field_comparison_rows_covers_correct_wrong_value_wrong_key_and_extra():
+    gt = {
+        "patient_name": "John Doe",  # correct
+        "age": "45",                 # wrong_value
+        "other_field": "Jane Roe",   # wrong_key: value found under "mislabeled" instead
+    }
+    pred = {
+        "patient_name": "John Doe",
+        "age": "46",
+        "mislabeled": "Jane Roe",
+        "invented_field": "some value",  # extra: no corresponding ground-truth key at all
+    }
+    rows = field_comparison_rows("LR_1", gt, pred)
+    by_field = {r["field"]: r for r in rows}
+
+    assert by_field["patient_name"]["status"] == "correct"
+    assert by_field["age"] == {
+        "document_id": "LR_1", "field": "age", "ground_truth": "45", "predicted": "46",
+        "status": "wrong_value", "verified": "", "note": "",
+    }
+    assert by_field["other_field"]["status"] == "wrong_key"
+    assert "mislabeled" in by_field["other_field"]["note"]
+    assert by_field["invented_field"]["status"] == "extra"
+    assert "mislabeled" not in by_field  # consumed by the reassignment, not its own row
+
+
+def test_comparison_rows_carry_the_ocr_verified_flag():
+    """documents/app.py's "did this value appear in the OCR text" flag is
+    the strongest trust signal we have, so it has to reach the reviewable
+    export — blank (not False) where it couldn't apply."""
+    field_rows = field_comparison_rows(
+        "LR_1",
+        {"a": "1", "b": "2"},
+        {"a": "1", "b": "2", "invented": "9"},
+        {"a": True, "b": False, "invented": False},
+    )
+    by_field = {r["field"]: r for r in field_rows}
+    assert by_field["a"]["verified"] is True
+    assert by_field["b"]["verified"] is False
+    assert by_field["invented"]["verified"] is False
+
+    test_rows = build_test_comparison_rows(
+        "LR_1",
+        [{"test_name": "pH", "result": "6.5"}, {"test_name": "Fat", "result": "3.2"}],
+        [{"test_name": "pH", "result": "6.5", "result_verified": True}],  # Fat missing entirely
+    )
+    by_test = {r["test_name"]: r for r in test_rows}
+    assert by_test["pH"]["verified"] is True
+    assert by_test["Fat"]["verified"] == ""  # nothing predicted, nothing to verify
+
+
+def test_comparison_rows_leave_verified_blank_for_predictions_predating_the_signal():
+    """A cached prediction from before the flag existed must read as
+    "unknown", never as "unverified" — that would look like a hallucination."""
+    rows = field_comparison_rows("LR_1", {"a": "1"}, {"a": "1"})  # no verified map passed
+    assert rows[0]["verified"] == ""
+
+    test_rows = build_test_comparison_rows("LR_1", [{"test_name": "pH", "result": "6.5"}], [{"test_name": "pH", "result": "6.5"}])
+    assert test_rows[0]["verified"] == ""
+
+
+def test_test_comparison_rows_covers_correct_partial_mismatch_and_disambiguates_by_sample_id():
+    gt = [
+        {"test_name": "pH", "sample_id": "S1", "result": "6.5", "unit": "pH", "reference_range": "6-8"},
+        {"test_name": "pH", "sample_id": "S2", "result": "7.2", "unit": "pH", "reference_range": "6-8"},
+        {"test_name": "Hemoglobin", "result": "13.5", "unit": "g/dL", "reference_range": "13-17"},
+    ]
+    pred = [
+        {"test_name": "pH", "sample_id": "S1", "result": "6.5", "unit": "pH", "reference_range": "6-8"},
+        {"test_name": "pH", "sample_id": "S2", "result": "7.0", "unit": "pH", "reference_range": "6-8"},  # wrong result only
+    ]
+    rows = build_test_comparison_rows("LR_1", gt, pred)
+    by_sample = {(r["test_name"], r["sample_id"]): r for r in rows}
+
+    assert by_sample[("pH", "S1")]["status"] == "correct"
+    assert by_sample[("pH", "S2")]["status"] == "wrong_value"
+    assert by_sample[("pH", "S2")]["note"] == "result mismatch"
+    assert by_sample[("Hemoglobin", None)]["status"] == "missing"
+
+
 # --------------------------------------------------------------------------- accumulator
 
 def test_metric_accumulator_finalize_computes_precision_recall_f1():
@@ -181,6 +396,8 @@ def test_metric_accumulator_finalize_computes_precision_recall_f1():
     assert metrics["key_f1"] == 0.75
     assert metrics["missing_field_rate"] == 0.25  # 1/4
     assert metrics["hallucination_rate"] == 0.25  # 1/4
+    assert metrics["field_fill_precision"] == 0.75  # 3/4 predicted values were exactly right
+    assert metrics["test_row_fill_precision"] is None  # no test rows predicted at all
 
 
 def test_metric_accumulator_returns_none_for_undefined_ratios_with_no_data():
@@ -191,81 +408,36 @@ def test_metric_accumulator_returns_none_for_undefined_ratios_with_no_data():
     assert metrics["document_count"] == 0
 
 
-def test_metric_accumulator_reports_naming_adjusted_metrics_alongside_strict_ones():
-    """A ground-truth value extracted under a DIFFERENT key name is a
-    measurement convention, not an extraction failure — reported as its own
-    adjusted figure while the strict key-identity metric stays untouched."""
+def test_fill_precision_does_not_credit_a_value_landed_under_the_wrong_key():
+    """A value found under the wrong key is a real form-fill error (it
+    corrupts the wrong box) even though the raw text was right — it must
+    not count toward field_fill_precision, and field_fill_precision must be
+    tracked separately per field/test so pooling them can't hide a weak
+    surface behind a strong one."""
     acc = MetricAccumulator()
-    acc.add(
-        domain_match=True, extraction_ok=True, exact_match=False,
-        field_counters={"key_tp": 3, "key_fp": 2, "key_fn": 2, "key_wrong_key": 1,
-                         "field_correct": 3, "field_total": 5, "missing": 1, "gt_nonnull_total": 5,
-                         "extra": 1, "predicted_nonnull_total": 5, "value_correct": 3, "value_total": 5},
-        test_counters={"test_gt_total": 0, "test_matched": 0, "test_pred_total": 0,
-                        "result_correct": 0, "unit_correct": 0, "reference_range_correct": 0, "matched_count": 0,
-                        "extra": 0},
+
+    # Field-level: the value is found, but under a different key than its
+    # own ground-truth key (compare_fields' "wrong_key" reassignment path).
+    field_failures, field_counters = compare_fields(
+        "LR_1",
+        {"patient_name": "John Doe", "other_field": None},
+        {"other_field": "John Doe"},
     )
+    assert any(f.error_type == "wrong_key" for f in field_failures)
+
+    # Test-level: every row correct, so it should read as fully reliable on
+    # its own — independent of how weak the field side is.
+    test_failures, test_counters = compare_tests(
+        "LR_1",
+        [{"test_name": "Hemoglobin", "result": "13.5", "unit": "g/dL", "reference_range": "13-17"}],
+        [{"test_name": "Hemoglobin", "result": "13.5", "unit": "g/dL", "reference_range": "13-17"}],
+    )
+
+    acc.add(domain_match=True, extraction_ok=True, exact_match=False, field_counters=field_counters, test_counters=test_counters)
     metrics = acc.finalize()
 
-    assert metrics["key_precision"] == 0.6  # strict, unchanged: 3/(3+2)
-    assert metrics["key_recall"] == 0.6
-    assert metrics["renamed_key_count"] == 1
-    # one reassignment moves out of both FP and FN and into TP: 4/(4+1)
-    assert metrics["key_precision_naming_adjusted"] == 0.8
-    assert metrics["key_recall_naming_adjusted"] == 0.8
-
-
-def test_compare_fields_counts_a_reassigned_value_as_a_renamed_key():
-    gt = {"lab_fax": "(405) 290-4046"}
-    pred = {"fax": "(405) 290-4046"}
-    failures, counters = compare_fields("LR_1", gt, pred)
-    assert counters["key_wrong_key"] == 1
-    assert counters["key_tp"] == 0  # strict key identity is untouched
-    assert any(f.error_type == "wrong_key" for f in failures)
-
-
-# --------------------------------------------------------------------------- value normalization
-
-def test_compare_fields_treats_the_same_date_written_differently_as_equal():
-    """MEASURED on the real set: "24.03.2021" and "24-03-2021" are the same
-    date recorded with different separators, not a wrong value."""
-    failures, counters = compare_fields("LR_1", {"dated": "24.03.2021"}, {"dated": "24-03-2021"})
-    assert failures == []
-    assert counters["value_correct"] == 1
-
-
-def test_compare_fields_zero_pads_dates_before_comparing():
-    failures, _ = compare_fields("LR_1", {"d": "1/2/2021"}, {"d": "01-02-2021"})
-    assert failures == []
-
-
-def test_compare_fields_does_not_equate_genuinely_different_dates():
-    failures, _ = compare_fields("LR_1", {"d": "24-03-2021"}, {"d": "25-03-2021"})
-    assert [f.error_type for f in failures] == ["wrong_value"]
-
-
-def test_compare_fields_does_not_guess_month_names_against_numbers():
-    """"05-Dec-2024" -> "05-12-2024" needs an assumption the document never
-    states, so it is deliberately left as a mismatch rather than guessed."""
-    failures, _ = compare_fields("LR_1", {"d": "05-12-2024"}, {"d": "05-Dec-2024"})
-    assert [f.error_type for f in failures] == ["wrong_value"]
-
-
-def test_compare_fields_collapses_whitespace_and_line_wrapping():
-    gt = {"address": "M/s. ANNAM FARMS\nNo. 28, Shri Raja"}
-    pred = {"address": "M/s. ANNAM FARMS No. 28,  Shri Raja"}
-    failures, counters = compare_fields("LR_1", gt, pred)
-    assert failures == []
-    assert counters["value_correct"] == 1
-
-
-def test_compare_fields_folds_unicode_pdf_text_artifacts():
-    # A PDF text layer can emit full-width digits or a non-breaking space
-    # where the other side has plain ASCII.
-    gt = {"v": "25 mg"}
-    pred = {"v": "２５ mg"}  # full-width 25 + NBSP
-    failures, _ = compare_fields("LR_1", gt, pred)
-    assert failures == []
+    assert metrics["field_fill_precision"] == 0.0   # the one predicted value was under the wrong key
+    assert metrics["test_row_fill_precision"] == 1.0  # unaffected by the field side's failure
 
 
 # --------------------------------------------------------------------------- score (reads a predictions/ cache, no LLM call itself)
@@ -450,36 +622,191 @@ def test_write_results_produces_json_and_csv_only_no_splits(tmp_path):
     assert not (output_dir / "validation.jsonl").exists()
 
 
-# --------------------------------------------------------------------------- unified_extraction
-
-def test_unified_extraction_drops_keys_the_model_left_empty():
-    """Once OCR text is included the model sees a form's label block and
-    emits keys it has no value for (correctly declining to invent one). A
-    key with no value is not a field — dropped at the shared boundary so
-    neither caller has to filter separately."""
-    from app.documents import unified_extraction
-    from types import SimpleNamespace
-
-    chain = SimpleNamespace(generate_json=lambda *a, **k: {
-        "fields": {"real": "27ABCDE1234F1Z5", "unpaired_label": "", "blank": "   ", "nulled": None},
-        "tests": [{"test_name": "Milk Fat", "result": "3.72"}],
-    })
-    result = unified_extraction.extract(chain, unified_extraction.DocumentPayload(text_blocks=["x"]))
-
-    assert result["fields"] == {"real": "27ABCDE1234F1Z5"}
-    assert len(result["tests"]) == 1
+def test_trailing_sentence_punctuation_is_not_a_value_difference():
+    """A labeler transcribing "EDTA Blood." and a model returning "EDTA Blood"
+    read the same cell — MEASURED on 002_Lab-report, where this alone cost a
+    field. Only TERMINAL punctuation is stripped, so it can never make two
+    genuinely different values equal."""
+    failures, counters = compare_fields("LR_1", {"sample_description": "EDTA Blood."}, {"sample_description": "EDTA Blood"})
+    assert failures == []
+    assert counters["value_correct"] == 1
+    # ...but a real difference is still a real difference
+    failures, _ = compare_fields("LR_1", {"a": "40-129"}, {"a": "40-130"})
+    assert failures[0].error_type == "wrong_value"
 
 
-def test_unified_extraction_survives_a_non_dict_reply():
-    from app.documents import unified_extraction
-    from types import SimpleNamespace
+def test_sample_type_and_sample_description_are_the_same_slot():
+    """The canonical vocabulary omitted sample_type, so the model used it and
+    the labeler used sample_description for the same printed cell."""
+    failures, counters = compare_fields("LR_1", {"sample_description": "EDTA Blood."}, {"sample_type": "EDTA Blood"})
+    assert failures == []
+    assert counters["value_correct"] == 1
+    assert counters["extra"] == 0  # not double-penalised as missing AND hallucinated
 
-    chain = SimpleNamespace(generate_json=lambda *a, **k: ["not", "a", "dict"])
-    assert unified_extraction.extract(chain, unified_extraction.DocumentPayload()) == {"fields": {}, "tests": []}
+
+def test_a_predicted_test_row_with_no_result_is_not_a_fabricated_value():
+    """A section header the model mistook for a row ("Differential Leucocyte
+    Count", result null) filled in no value, so it must not count as a
+    hallucination — compare_fields already ignores null-valued predictions."""
+    gt = [{"test_name": "Neutrophil", "result": "78", "unit": "%"}]
+    pred = [
+        {"test_name": "Differential Leucocyte Count", "result": None, "unit": None},
+        {"test_name": "Neutrophil", "result": "78", "unit": "%"},
+    ]
+    failures, counters = compare_tests("LR_1", gt, pred)
+    assert counters["extra"] == 0
+    assert counters["test_pred_total"] == 1  # the value-less row isn't a predicted value
+    assert counters["result_correct"] == 1
+    assert not [f for f in failures if f.error_type == "extra"]
 
 
-def test_unified_extraction_payload_falls_back_to_an_image_only_prompt():
-    from app.documents import unified_extraction
+# --------------------------------------------------------------------------- failure_rows (triage export)
 
-    payload = unified_extraction.DocumentPayload(images=[b"png1", b"png2"])
-    assert "2 attached page image(s)" in payload.user_text
+def test_failure_rows_shows_both_sides_and_categorises_each_mismatch():
+    """The triage sheet has to answer "what did we want, what did we get, and
+    why is that wrong" in one row — including the model's OWN key when it
+    named the field differently."""
+    gt = {
+        "fields": {
+            "report_number": "R-123",        # correct -> not a failure row
+            "client_name": "Acme Labs",      # model called it something else
+            "page": "Page 1 of 3",           # truncated
+            "lab_email": "a@b.com",          # genuine misread
+            "sample_name": "Milk",           # never extracted
+        },
+        "tests": [{"test_name": "pH", "result": "6.5", "unit": "pH"}],
+    }
+    pred = {
+        "fields": {
+            "report_number": "R-123",
+            "customer_name": "Acme Labs",    # alias-folded to client_name
+            "page": "1 of 3",
+            "lab_email": "a@c.com",
+            "invented": "nonsense",
+        },
+        "tests": [{"test_name": "pH", "result": "7.0", "unit": "pH"}],
+    }
+    rows = failure_rows("LR_1", gt, pred)
+    by_cat = {r["category"]: r for r in rows}
+
+    assert "report_number" not in [r["gt_key"] for r in rows]  # correct fields are omitted
+    assert by_cat["wrong_value_truncated"]["gt_value"] == "Page 1 of 3"
+    assert by_cat["wrong_value_truncated"]["pred_value"] == "1 of 3"
+    assert by_cat["wrong_value_different"]["gt_key"] == "lab_email"
+    assert by_cat["never_extracted"]["gt_key"] == "sample_name"
+    assert by_cat["never_extracted"]["pred_value"] is None
+    assert by_cat["hallucinated"]["pred_key"] == "invented"
+    assert by_cat["hallucinated"]["gt_key"] is None
+    assert by_cat["test_wrong_result"]["gt_value"] == "6.5"
+    assert by_cat["test_wrong_result"]["pred_value"] == "7.0"
+    # every row carries a human-readable reason
+    assert all(r["reason"] for r in rows)
+
+
+def test_failure_rows_names_the_key_the_model_actually_used():
+    """A naming disagreement is only actionable if you can see BOTH names."""
+    gt = {"fields": {"start_date_of_analysis": "01-Jan-2024"}, "tests": []}
+    pred = {"fields": {"worksht_dt_tm": "01-Jan-2024"}, "tests": []}
+    rows = failure_rows("LR_1", gt, pred)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["category"] == "wrong_key"
+    assert row["gt_key"] == "start_date_of_analysis"
+    assert row["pred_key"] == "worksht_dt_tm"
+    assert "worksht_dt_tm" in row["reason"]
+
+
+def test_failure_rows_is_empty_for_a_perfect_extraction():
+    gt = {"fields": {"a": "1"}, "tests": [{"test_name": "pH", "result": "6.5"}]}
+    assert failure_rows("LR_1", gt, gt) == []
+
+
+def test_gt_vs_predicted_rows_shows_hits_and_misses_side_by_side():
+    """The review sheet: four columns, one row per field/test, hits included —
+    `hit` drives the row colour, so a miss must show an empty predicted side
+    and a hallucination an empty ground-truth side."""
+    gt = {
+        "fields": {"report_number": "R-1", "sample_name": "Milk", "client_name": "Acme"},
+        "tests": [{"test_name": "pH", "result": "6.5"}, {"test_name": "Fat", "result": "3.2"}],
+    }
+    pred = {
+        "fields": {"report_number": "R-1", "customer_name": "Acme", "invented": "x"},
+        "tests": [{"test_name": "pH", "result": "7.0"}],
+    }
+    rows = gt_vs_predicted_rows("LR_1", gt, pred)
+    by_gt = {r["ground_truth_field"]: r for r in rows if r["ground_truth_field"]}
+
+    assert by_gt["report_number"]["hit"] == "HIT"
+    # alias-folded, so it matches and the predicted side shows the value
+    assert by_gt["client_name"]["hit"] == "HIT"
+    # never extracted -> predicted side empty
+    assert by_gt["sample_name"]["hit"] == "MISS"
+    assert by_gt["sample_name"]["predicted_value"] is None
+    # wrong result -> both sides populated
+    assert by_gt["tests.pH"]["hit"] == "MISS"
+    assert by_gt["tests.pH"]["predicted_value"] == "7.0"
+    # missing test row
+    assert by_gt["tests.Fat"]["predicted_field"] is None
+    # hallucination -> ground-truth side empty
+    hallucinated = [r for r in rows if r["ground_truth_field"] is None]
+    assert {r["predicted_field"] for r in hallucinated} == {"invented"}
+    assert all(r["hit"] == "MISS" for r in hallucinated)
+
+
+def test_gt_vs_predicted_rows_are_all_hits_for_a_perfect_extraction():
+    gt = {"fields": {"a": "1"}, "tests": [{"test_name": "pH", "result": "6.5"}]}
+    rows = gt_vs_predicted_rows("LR_1", gt, gt)
+    assert len(rows) == 2
+    assert all(r["hit"] == "HIT" for r in rows)
+
+
+def test_separator_punctuation_is_ignored_when_comparing_values():
+    """Values are compared on their characters, words and numbers — not on
+    which separator each side used. MEASURED as the most common
+    punctuation-only mismatch: a comma present on one side and absent on the
+    other, across lab_address / lab_website / client_address."""
+    for gold, pred in [
+        ("Guindy, Chennai - 600 032", "Guindy Chennai - 600 032"),
+        ("A - Super 19, T.V.K. Estate", "A - Super 19 | T.V.K. Estate"),
+        ("www.a.in, www.b.in", "www.a.in / www.b.in"),
+    ]:
+        failures, counters = compare_fields("LR_1", {"lab_address": gold}, {"lab_address": pred})
+        assert failures == [], f"{gold!r} vs {pred!r} should match"
+        assert counters["value_correct"] == 1
+
+
+def test_numeric_punctuation_is_still_significant():
+    """"." and "-" carry numeric meaning — dropping them would collapse "6.5"
+    to "65" and a range to a single number, crediting wrong answers."""
+    for gold, pred in [("6.5", "65"), ("40-129", "40129"), ("R-123", "R-124")]:
+        _, counters = compare_fields("LR_1", {"a": gold}, {"a": pred})
+        assert counters["value_correct"] == 0, f"{gold!r} must not match {pred!r}"
+
+
+def test_the_page_label_is_not_part_of_the_page_value():
+    """A page cell prints "Page 4 Of 15": the label is "Page", the value is
+    "4 Of 15", so either form has read it correctly."""
+    for gold, pred in [
+        ("Page 4 Of 15", "4 Of 15"),
+        ("Page : 3 of 7", "3 of 7"),
+        ("Page 1 of 1", "Page 1 of 1"),
+        ("1 of 3", "Page 1 of 3"),
+    ]:
+        failures, counters = compare_fields("LR_1", {"page": gold}, {"page": pred})
+        assert failures == [], f"page {gold!r} vs {pred!r} should match"
+        assert counters["value_correct"] == 1
+    # a genuinely different page number still fails
+    _, counters = compare_fields("LR_1", {"page": "Page 4 of 15"}, {"page": "5 of 15"})
+    assert counters["value_correct"] == 0
+
+
+def test_the_page_rule_is_scoped_to_the_page_field_only():
+    """A general "one value contains the other" rule was measured and
+    rejected — it credited a dropped date and a dropped specialty. So the
+    label-stripping must not leak to other fields."""
+    _, counters = compare_fields(
+        "LR_1",
+        {"coll_date_time": "03/02/2019 09:55:20", "department": "Dept of Lab Medicine: Histopathology"},
+        {"coll_date_time": "09:55:20", "department": "Dept of Lab Medicine"},
+    )
+    assert counters["value_correct"] == 0

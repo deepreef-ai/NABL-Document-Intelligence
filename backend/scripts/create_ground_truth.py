@@ -83,9 +83,7 @@ def main() -> int:
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     todo: list[tuple[str, str]] = []  # (filename, staged material description)
-    for source_path in sorted(dataset_dir.iterdir()):
-        if not source_path.is_file():
-            continue
+    for source_path in sorted(p for p in dataset_dir.rglob("*") if p.is_file()):
         stem = source_path.stem
         if stem in already_labeled:
             continue

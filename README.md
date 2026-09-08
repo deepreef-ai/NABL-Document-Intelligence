@@ -46,19 +46,15 @@ Key modules (`backend/app/`):
 
 ## LLM providers
 
-No paid API key is required. `backend/app/llm/` implements a provider-agnostic chain:
-
-| Provider | Free key from | Vision (image input) | Notes |
-|---|---|---|---|
-| **Gemini** | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | ✅ | Default first link — the only one used for the English-scan fallback. |
-| **Groq** | [console.groq.com/keys](https://console.groq.com/keys) | ❌ (text only, here) | Very fast, generous free tier. |
-| **Hugging Face** | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) | ❌ (text only, here) | Least reliable link — hosted model availability varies; last resort. |
-
-Set any subset of `GEMINI_API_KEY` / `GROQ_API_KEY` / `HUGGINGFACE_API_KEY` in `backend/.env` —
-only providers with a key set are added to the chain. `LLM_PROVIDER_ORDER` (default
-`gemini,groq,huggingface`) controls the order they're tried in. If every configured provider fails
-on a given call (e.g. everyone's free tier is rate-limited at once), the request returns `503`
-with a message naming each provider's failure, rather than a silent crash.
+`backend/app/llm/` implements a provider chain, currently configured with one link: **Amazon Nova**
+on AWS Bedrock (`llm/providers.py`'s `NovaProvider`), used for the wizard chat, classification,
+extraction, and the English-scan vision fallback. It authenticates via the ambient AWS credential
+chain (the same one `documents/ocr_client.py`'s Lambda invoke relies on) rather than an API key —
+set `NOVA_MODEL` (a region-prefixed inference-profile ID, e.g. `us.amazon.nova-2-lite-v1:0`) and
+`NOVA_REGION` in `backend/.env`. `LLM_PROVIDER_ORDER` (default `nova`) is still an ordered,
+comma-separated list — the chain design supports adding a second provider later — but with only
+one link configured, a Nova failure surfaces directly as a `503` naming the failure, rather than
+falling through to anything else.
 
 ## Known limitation: vision-LLM OCR fallback has no bounding boxes
 
@@ -70,9 +66,9 @@ in-process, no AWS call) rather than routed through the Lambda.
 
 The remaining gap is narrower than "no English OCR": if RapidOCR itself can't process an image
 (not installed, corrupt file, etc.) or a script is neither `english` nor one of `deepreef-ocr`'s
-supported scripts, extraction falls back to the LLM chain's vision input (Gemini only, see above).
-That path has no reliable per-field bounding box (the review UI shows a page-level highlight, not
-a tight box) — a real limitation, but one that's now rarely hit rather than the primary English path.
+supported scripts, extraction falls back to the LLM chain's vision input (Nova, see above). That
+path has no reliable per-field bounding box (the review UI shows a page-level highlight, not a
+tight box) — a real limitation, but one that's now rarely hit rather than the primary English path.
 
 Born-digital PDFs (most GST/CIN certs, SOPs, PT/ILC reports) and DOCX files skip OCR entirely and
 are unaffected by this either way.
@@ -128,12 +124,12 @@ object. Born-digital-PDF text extraction reads up to 40 pages for this reason (a
 runs 15-30 pages, and the first several are NABL's own boilerplate amendment sheet/table of
 contents, not applicant data — 5 pages would never reach the real content).
 
-This path needs a large context window — a real filled form's text can run to 100K+ characters,
-which only Gemini's context budget comfortably handles; Groq and the HF router both reject a
-payload that large outright (413/400) rather than truncating gracefully. In practice this doc_type
-works reliably only when Gemini is available; if it's rate-limited and the fallbacks can't take the
-payload size, the upload fails with a clear "every provider failed" error rather than silently
-returning nothing.
+This path needs a large context window — a real filled form's text can run to 100K+ characters —
+which is why `extract_full_form_fields_chunked` (one LLM call per page/chunk, see
+`documents/extractor.py`) is the real entry point for a genuine 15-30 page upload rather than
+`extract_full_form_fields`'s single-shot path. With only Nova configured, a rate limit or outage on
+it fails the upload outright with a clear "every provider failed" error rather than silently
+returning nothing — there's no second provider to fall through to.
 
 NABL 100B is a pure accreditation-procedure document with no applicant fields at all — useful only
 as terminology reference (MU vs. CMC, Z-score vs. En-value), not modeled as a form.
@@ -155,7 +151,7 @@ cd backend
 python -m venv .venv
 .venv/Scripts/activate        # .venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
-cp .env.example .env          # fill in at least one of GEMINI/GROQ/HUGGINGFACE_API_KEY
+cp .env.example .env          # set NOVA_MODEL and make sure AWS credentials are available
 uvicorn app.main:app --reload --port 8000
 ```
 

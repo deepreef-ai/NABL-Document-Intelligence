@@ -1,0 +1,57 @@
+{
+  "fields": {
+    "reg_date": "14/02/2017 10:24",
+    "page": "Page 1 of 3"
+  },
+  "field_confidence": {
+    "reg_date": 1.0,
+    "page": 1.0
+  },
+  "field_verified": {
+    "reg_date": true,
+    "page": true
+  },
+  "tests": [
+    {
+      "test_name": "TRIGLYCERIDES (Lipase)",
+      "result": "87",
+      "unit": "mg/dL",
+      "reference_range": "RECOMMENDED CUT OFF\nPOINTS FOR CORONARY HEART\nDISEASE RISK-\nNormal : <150\nBoderline high: 151-199\nHigh: 200-499\nVery High: >499 mg/dL",
+      "method": "Lipase",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "SERUM CHOLESTEROL (Cholestrol oxidase)",
+      "result": "189",
+      "unit": "mg/dL",
+      "reference_range": "RISK-CUTOFF THRESHOLD FOR\nCORONARY HEART DISEASE:\nAdult:\nDesirable: <200\nBorderline High: 200 - 240\nHigh:> 240 mg/dL\nChild & Adolescent:\nDesirable:<170 mg/dL\nBorderline High:170-199 mg/dL\nHigh:>199 mg/dL",
+      "method": "Cholestrol oxidase",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "H D L CHOLESTEROL (Phosphotungstate/Mg)",
+      "result": "57",
+      "unit": "mg/dL",
+      "reference_range": "Risk-cutoff threshold for\nCoronary Heart Disease-\nFemales:\nNo risk->65\nModerate risk-45-65\nHigh risk-<45 mg/dL\nMales:\nNo risk->55\nModerate risk-35-55\nHigh risk-<35 mg/dL",
+      "method": "Phosphotungstate/Mg",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "LDL CHOLESTROL (Direct Estimation)",
+      "result": "115",
+      "unit": "mg/dL",
+      "reference_range": "Levels in terms of risk for\ncoronary heart disease-\nAdult levels:\nOptimal: <100\nNear/ Above optimal:100-129\nBorderline high:130-159\nHigh:160-189\nVery high:>=190 mg/dL\nChild & Adolescent:\nDesirable:<110\nBorderline:110-120\nHigh:>=130 mg/dL",
+      "method": "Direct Estimation",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    }
+  ],
+  "pipeline_error": null
+}

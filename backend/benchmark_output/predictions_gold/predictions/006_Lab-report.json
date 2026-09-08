@@ -1,0 +1,368 @@
+{
+  "fields": {
+    "document_title": "PRE-MEDICAL EXAMINATION REPORT",
+    "height": "164CMS",
+    "weight": "71Kg",
+    "marital_status": "MARRIED",
+    "psychiatric_and_neurological_disorders": "NAD",
+    "allergy": "NAD",
+    "all_investigations_as_on_date": "NO ACTIVE LUNG LESSION IS EVIDENT",
+    "fit_status": "FIT",
+    "footer": "This Lest Report is not Valid For Legal Purposes. The Lab Report Represent Only an Opinion and the diagnosis in Case of un expected results not matching the clinical finding the Patient / Clinical is advised to contact the immediately."
+  },
+  "field_confidence": {
+    "document_title": 1.0,
+    "height": 1.0,
+    "weight": 1.0,
+    "marital_status": 1.0,
+    "psychiatric_and_neurological_disorders": 1.0,
+    "allergy": 1.0,
+    "all_investigations_as_on_date": 1.0,
+    "fit_status": 1.0,
+    "footer": 1.0
+  },
+  "field_verified": {
+    "document_title": true,
+    "height": true,
+    "weight": true,
+    "marital_status": true,
+    "psychiatric_and_neurological_disorders": true,
+    "allergy": true,
+    "all_investigations_as_on_date": true,
+    "fit_status": true,
+    "footer": true
+  },
+  "tests": [
+    {
+      "test_name": "R. EYE",
+      "result": "6/6",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "L. EYE",
+      "result": "6/6",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "R. EAR",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "L. EAR",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "B.P",
+      "result": "120/80mm/hg",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Murmur / Heart",
+      "result": "NAD/NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "LUNGS",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "CHEST X-RAY (P.A VIEW)",
+      "result": "NORMAL",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "ABDOMEN",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "HERNIA",
+      "result": "ABSENT",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "VERICOSE VEINS",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "EXTREMITIES",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "CLINICAL",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "SUGAR",
+      "result": "ABSENT",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "ALBUMIN",
+      "result": "ABSENT",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "BIHARZIASIS (IF ENDEMIC)",
+      "result": "ABSENT",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "1. HELMINTHES",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "2.GIARDIA",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "3. BIHARZIASIS ( IF ENDEMIC) CULTURE",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "4.SALMONELLA / SHIGELLA",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "5. V. CHOLERA (IF ENDEMIC)",
+      "result": "NAD",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "HEAMOGLOBIN",
+      "result": "13.6mg/dl %",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "BLOOD GROUP",
+      "result": "'AB'POSITIVE",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "1. MALARIA",
+      "result": "NOT DETECTED",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "2.MICRO FILARIA",
+      "result": "NOT DETECTED",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "1.F.B.S",
+      "result": "86mg%",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "2.L.F.T.S",
+      "result": "NORMAL",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "3.CREATININE",
+      "result": "0.7mg%",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "1 HIV I&II",
+      "result": "NON REACTIVE",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "2.HBs Ag",
+      "result": "NEGATIVE",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "3. Anti HCV",
+      "result": "NEGATIVE",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "VDRL",
+      "result": "NEGATIVE",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "TPHA",
+      "result": "NEGATIVE",
+      "unit": null,
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    }
+  ],
+  "pipeline_error": null
+}

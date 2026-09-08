@@ -1,0 +1,51 @@
+{
+  "fields": {
+    "report_issue_date": "02 Nov 2020",
+    "authorized_on": "03 Nov 2020 14:54",
+    "released_on": "03 Nov 2020 13:48",
+    "sample_type": "EDTA Whole Blood",
+    "ordered_date": "02 Nov 2020 18:27",
+    "date_of_collection": "03 Nov 2020 12:34",
+    "date_of_receipt": "03 Nov 2020 12:44",
+    "registered_date": "03 Nov 2020 12:44",
+    "printed_on": "03 Nov 2020 06:22 PM",
+    "footer": "This is a computer generated report. Signature is not required."
+  },
+  "field_confidence": {
+    "report_issue_date": 1.0,
+    "authorized_on": 1.0,
+    "released_on": 1.0,
+    "sample_type": 1.0,
+    "ordered_date": 1.0,
+    "date_of_collection": 1.0,
+    "date_of_receipt": 1.0,
+    "registered_date": 1.0,
+    "printed_on": 1.0,
+    "footer": 1.0
+  },
+  "field_verified": {
+    "report_issue_date": true,
+    "authorized_on": true,
+    "released_on": true,
+    "sample_type": true,
+    "ordered_date": true,
+    "date_of_collection": true,
+    "date_of_receipt": true,
+    "registered_date": true,
+    "printed_on": true,
+    "footer": true
+  },
+  "tests": [
+    {
+      "test_name": "Glycocylated Hemoglobin, %",
+      "result": "5.0",
+      "unit": null,
+      "reference_range": "<5.7 Normal\n5.7-6.4 PREDIABETES\n>6.4 DIABETES\nIn a person with diabetes, HbA1c value\nis as advised by your Doctor",
+      "method": "Ion Exchange HPLC.",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    }
+  ],
+  "pipeline_error": null
+}
