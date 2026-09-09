@@ -79,7 +79,12 @@ SYSTEM_PROMPT = (
     "  discipline, group, sample_sub_group, nabl_scope, testing_lab_address,\n"
     "  quality_manager, signatory_name, signatory_title, remarks.\n"
     "- For any other visible field not in this list, create a concise snake_case key from the label.\n"
-    "- Keep values verbatim; do not reformat dates or numbers.\n"
+    "- SPELL THE KEY OUT IN FULL - never abbreviate a word to save space. Write\n"
+    "  sample_collection_datetime, NOT samp_coll_dt; worksheet_datetime, NOT\n"
+    "  work_sht_dttm; date_of_birth, NOT dob; quantity, NOT qty.\n"
+    "- Keep values verbatim; do not reformat dates or numbers. A result cell that\n"
+    "  prints an out-of-range flag beside the number (\"0.35 High\", \"4.2 L\") keeps\n"
+    "  the flag - it is part of what the page says.\n"
     "- Never put results-table columns (test_name, result, unit, reference_range, method, sample_id) into 'fields'.\n\n"
 
     "CONFIDENCE:\n"
@@ -94,6 +99,12 @@ SYSTEM_PROMPT = (
     "- 'tests' contains every row of every results table: analyte/parameter name, observed value, unit, "
     "reference range, method, sample ID if present.\n"
     "- If a column is missing (e.g., no units), set that key to null.\n"
+    "- NEVER CONVERT UNITS — transcribe exactly what is printed. If the page says\n"
+    "  \"mg/dl\" do not return \"umol/l\"; if it says \"U/l\" do not return \"IU/l\"; if it\n"
+    "  says \"g/dl\" do not return \"g/l\". This applies to the result too: report the\n"
+    "  number as printed, never rescaled to suit a converted unit.\n"
+    "- If a report prints BOTH a conventional and an S.I. column for the same\n"
+    "  analyte, use the conventional (first) one.\n"
     "- If there are no tabular results, set 'tests' to an empty list [].\n"
     "- DATES OR SAMPLES AS COLUMNS: if the table has one row per analyte and\n"
     "  several DATE (or sample) columns of results — a trend/comparison table —\n"
@@ -129,7 +140,11 @@ LETTERHEAD_PROMPT = (
     "  signatory_name, signatory_title, quality_manager, reviewed_by, approved_by\n"
     "    (a name printed inside a rubber stamp counts; an illegible handwritten\n"
     "     signature with no printed name does not, but its printed TITLE does),\n"
-    "  copyright, limits_note, note, conformity_statement.\n\n"
+    "  copyright, limits_note, note, conformity_statement,\n"
+    "  end_of_report (the closing marker a report prints after its last\n"
+    "    result — \"***END OF REPORT***\", \"-- End of Report --\",\n"
+    "    \"End of Test Report\"; copy it verbatim including any asterisks\n"
+    "    or dashes).\n\n"
 
     "RULES:\n"
     "- Copy values exactly as written (punctuation, case, spacing, separators).\n"
@@ -137,7 +152,16 @@ LETTERHEAD_PROMPT = (
     "its value (no \"lab_name\": \"LAB NAME\").\n"
     "- A label whose value is blank or redacted is omitted entirely.\n"
     "- Invent a snake_case key from the page's own label only for a lab-identity or "
-    "page-furniture field genuinely not listed above.\n\n"
+    "page-furniture field genuinely not listed above.\n"
+    "- NEVER name a key after its own value. A masthead prints many values with no\n"
+    "  label beside them; name those by WHAT THEY ARE, using the list above:\n"
+    "    a bare web address -> lab_website (a second one -> lab_website_2)\n"
+    "    a bare email address -> lab_email\n"
+    "    a bare phone/fax number -> lab_phone / lab_fax\n"
+    "    a postal address block -> lab_address\n"
+    "    a company registration number (CIN/UDYAM/GST) -> cin / udyam_no\n"
+    "  Returning {\"www_example_com\": \"www.example.com\"} is WRONG twice: the real\n"
+    "  field is missed and a meaningless one is invented.\n\n"
 
     "Respond with ONLY this JSON, no other text:\n"
     "{\"fields\": {\"<snake_case_key>\": \"<value exactly as written>\", \"...\": \"...\"}}"
@@ -263,7 +287,10 @@ def _verified_against_source(value, source_norm: str) -> bool:
     return bool(value_norm) and value_norm in source_norm
 
 
-def extract_lab_report(chain: LlmChain, text: str, image: bytes | None = None, image_media_type: str | None = None) -> dict:
+def extract_lab_report(
+    chain: LlmChain, text: str, image: bytes | None = None,
+    image_media_type: str | None = None, images: list[tuple[bytes, str]] | None = None,
+) -> dict:
     """Returns {"fields", "field_confidence", "field_verified", "tests"}.
 
     Two trust signals ride alongside every extracted value:
@@ -290,10 +317,19 @@ def extract_lab_report(chain: LlmChain, text: str, image: bytes | None = None, i
 
     `image`/`image_media_type` are optional: SYSTEM_PROMPT is written
     assuming both an image and OCR text arrive together, but a caller with
-    no single image for the whole document (see
-    scripts/generate_predictions_and_score.py's multi-page-PDF case) can
-    still call this text-only."""
-    result = chain.generate_json(SYSTEM_PROMPT, text, image=image, image_media_type=image_media_type)
+    no image at all can still call this text-only.
+
+    `images` is the multi-page form: one call covering a WINDOW of pages
+    gets that window's page rasters, so the text and the pixels it is
+    checked against describe the same pages. See
+    scripts/generate_predictions_and_score.py's page-window builder."""
+    # `images` only when a caller actually sent several, so a chain (or test
+    # double) that predates the multi-image parameter keeps working — same
+    # reasoning as LlmChain.generate_json's own pass-through.
+    extra = {"images": images} if images else {}
+    result = chain.generate_json(
+        SYSTEM_PROMPT, text, image=image, image_media_type=image_media_type, **extra,
+    )
     if not isinstance(result, dict):
         return {"fields": {}, "field_confidence": {}, "field_verified": {}, "tests": []}
 
@@ -335,3 +371,84 @@ def extract_lab_report(chain: LlmChain, text: str, image: bytes | None = None, i
         # anything the second pass adds; stripped before the result is saved.
         "_source_norm": source_norm,
     }
+
+
+# --- Adapting the {fields, tests} shape to the review pipeline ---------------
+# extract_lab_report's output is the shape the accuracy benchmark scores and
+# the ground-truth files are written in, so it stays authoritative. The review
+# pipeline (documents/pipeline.py) instead stores a flat list of
+# {field, value, confidence} rows, one per ExtractedField. Converting HERE,
+# next to the function that produces the shape, is what lets the app and the
+# benchmark share ONE prompt and one extractor instead of maintaining two.
+
+# Columns of a results row worth storing, in the order they should appear.
+_TEST_COLUMNS = ("test_name", "result", "unit", "reference_range", "method", "sample_id")
+
+# Ceiling on rows kept from one results table — a backstop against a
+# degenerate/looping model response writing junk rows to extracted_fields.
+#
+# Set above the largest measured real document: config.py records
+# high-protein-paneer.pdf at 272 test rows, so 300 clears it. Note this is
+# rarely the binding limit — the provider's max-output-tokens cap (see
+# config.py's nova_max_tokens) usually fires first, returning a reply cut off
+# mid-JSON that llm/json_utils.py rejects and pipeline.py skips with a
+# warning. It CAN bind on a table of many short rows, which packs more rows
+# into the same token budget; a table over 300 such rows is truncated here.
+MAX_TEST_ROWS = 300
+
+# A value that does NOT appear verbatim in the OCR text we sent is capped to
+# this confidence, which puts it under the review threshold (0.85) so a human
+# is asked to confirm it. MEASURED 2026-09-03 over 331 values across 10
+# documents: every value failing that check (34/34) was wrong, with zero
+# correct values wrongly flagged — roughly 3x the error recall of the model's
+# own self-reported confidence, which sat at 1.0 for 96% of values including
+# 81 wrong ones. See _verified_against_source.
+UNVERIFIED_CONFIDENCE_CAP = 0.5
+
+
+def _cell(value) -> str | None:
+    """Everything downstream treats a value as text — documents/grounding.py's
+    ground() calls .strip() on it, and ExtractedField.value is a String
+    column. A bare number ("s_no": 1) arrives as int and used to raise
+    AttributeError, failing the whole document."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text if text.strip() else None
+
+
+def _confidence(raw, verified) -> float:
+    return min(_normalize_confidence(raw), UNVERIFIED_CONFIDENCE_CAP) if verified is False else _normalize_confidence(raw)
+
+
+def flatten_for_review(result: dict) -> list[dict]:
+    """extract_lab_report's {fields, tests} -> the flat
+    [{field, value, confidence}] contract every other extractor in
+    documents/extractor.py returns.
+
+    A results table becomes one field per CELL, keyed "tests[i].column" — the
+    same convention documents/compiler.py already uses for repeating records.
+    Per cell rather than one JSON blob per table so each value is separately
+    editable and confirmable in the review UI, and — the part a blob can never
+    have — groundable to its own bounding box on the page, since
+    documents/pipeline.py grounds each field's value independently.
+    """
+    flat: list[dict] = []
+
+    confidences = result.get("field_confidence") or {}
+    verified = result.get("field_verified") or {}
+    for key, value in (result.get("fields") or {}).items():
+        cell = _cell(value)
+        if cell is not None:
+            flat.append({"field": key, "value": cell, "confidence": _confidence(confidences.get(key), verified.get(key))})
+
+    rows = result.get("tests") or []
+    for i, row in enumerate(rows[:MAX_TEST_ROWS]):
+        if not isinstance(row, dict):
+            continue
+        confidence = _confidence(row.get("confidence"), row.get("result_verified"))
+        for column in _TEST_COLUMNS:
+            cell = _cell(row.get(column))
+            if cell is not None:
+                flat.append({"field": f"tests[{i}].{column}", "value": cell, "confidence": confidence})
+    return flat

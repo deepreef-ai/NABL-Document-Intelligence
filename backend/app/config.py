@@ -1,12 +1,21 @@
 from functools import lru_cache
+from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/app/config.py -> backend/.env. Anchored to this file rather than
+# left relative to the process CWD: scripts/ put backend/ on sys.path but
+# never chdir into it, so running them from the repo root silently loaded no
+# .env at all and reported "No LLM provider configured" with a valid one set.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
     """Runtime configuration, overridable via env vars or a .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
     # LLM — powers the wizard chat, classification, and extraction. Amazon
     # Nova on AWS Bedrock (llm/providers.py's NovaProvider) is the primary
@@ -17,7 +26,16 @@ class Settings(BaseSettings):
     # NovaProvider's docstring for why the bare model ID is rejected).
     nova_model: str = ""
     nova_region: str = "us-east-1"
-    nova_max_tokens: int = 8192
+    # 8192 was too small for a big results table and cost us whole
+    # documents. MEASURED 2026-09-05: high-protein-paneer.pdf's 272 test
+    # rows serialize to ~11,100 output tokens, so the reply was cut off
+    # mid-JSON and the document scored zero. A reasoning model also spends
+    # THINKING tokens out of this same budget, which is why hp-lab-report
+    # truncated at ~3,500 tokens of actual content. The cap is a ceiling,
+    # not a reservation - a short document still returns a short reply and
+    # costs nothing extra - so it is set well clear of the largest document
+    # in the set rather than just above it.
+    nova_max_tokens: int = 32768
 
     # Google Gemini (llm/providers.py's GeminiProvider) — a KEYED fallback so
     # extraction and the accuracy benchmark survive a Bedrock outage (see that
@@ -32,7 +50,7 @@ class Settings(BaseSettings):
     # the chain moves to the next one when a key is exhausted.
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
-    gemini_max_tokens: int = 8192
+    gemini_max_tokens: int = 32768
 
     # Groq (llm/providers.py's GroqProvider) — third fallback, a separate
     # free-tier allowance again. MUST be a VISION model: the extraction
@@ -40,6 +58,11 @@ class Settings(BaseSettings):
     # models ignore image parts silently rather than erroring.
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"
+    # NOT raised alongside the other two: Groq's binding limit is a rate
+    # limit (MEASURED: 7,000 input and 1,000 output tokens/minute on the
+    # free tier, which rejected high-protein-paneer with a 413 on INPUT
+    # size alone), not the per-reply cap. A bigger cap cannot buy headroom
+    # the tier does not sell.
     groq_max_tokens: int = 8192
 
     @property
@@ -53,7 +76,14 @@ class Settings(BaseSettings):
     # Comma-separated, tried in order, first success wins (llm/chain.py). Put
     # "nova,gemini" here to fall back automatically; "gemini" alone to force it.
     llm_provider_order: str = "nova"
-    llm_timeout_seconds: float = 30.0
+    # 30s was tuned for short chat-style calls and is too short for extraction:
+    # one document is a page image plus its OCR text plus a ~1.5k-token system
+    # prompt, and a large results table takes far longer than 30s just to
+    # generate and transfer. scripts/generate_predictions_and_score.py already
+    # overrode this to 180s for exactly that reason; the app needed the same.
+    # A timeout also costs more than the one call — llm/chain.py backs the
+    # provider off 15s and DOUBLES that per consecutive timeout.
+    llm_timeout_seconds: float = 120.0
 
     # documents/pipeline.py's completed_application_form (whole-form,
     # per-section) extraction uses this order instead of llm_provider_order —
@@ -88,6 +118,64 @@ class Settings(BaseSettings):
     qdrant_storage_dir: str = "./qdrant_storage"
     retrieval_top_k: int = 4
 
+    # Pages read from a SCANNED PDF (documents/pipeline.py). Unlike the
+    # born-digital path — where PyMuPDF text is free and all 40 pages are read
+    # then chunked by character count — every scanned page costs a rasterize,
+    # an OCR pass and its own extraction call, so this is a real budget lever.
+    # It was hardcoded at 5, which silently truncated any longer report while
+    # still returning a confident-looking result: a 12-page scan reported 5
+    # pages' worth of fields with no indication the rest existed. Raised well
+    # clear of a typical report; lower it if quota is tighter than coverage.
+    max_scanned_pages: int = 25
+
+    # Per-document LLM call ceiling (documents/call_budget.py). Before this
+    # nothing counted calls and nothing capped them: MEASURED on this branch,
+    # a 17-page scan cost 68 and a 50-page PDF up to 74, against a free-tier
+    # allowance of ~40 calls/DAY — so one document could exhaust a day.
+    #
+    # The cost driver is chunks and pages, which vary hugely between documents
+    # of the same page count, so a page cap cannot express it. This can: the
+    # pipeline stops asking for more calls once the ceiling is reached and
+    # returns what it already has, with the reason recorded on the document
+    # (never raising — stopping early is an operating condition, not a
+    # failure).
+    max_classification_calls: int = 1
+    max_initial_extraction_calls: int = 4
+    max_recovery_calls: int = 2
+    max_total_llm_calls: int = 6
+
+    # documents/lab_report.py's extract_letterhead — a second, focused call for
+    # the masthead/footer block. MEASURED 2026-09-04 on a 48-document run: ~180
+    # of 363 never-extracted fields were exactly these (lab_phone, lab_email,
+    # laboratory_accreditation_no, cin, udyam_no, footer, ...), because one
+    # call asked to transcribe a 60-row results table loses the masthead. It
+    # DOUBLES the calls per document though, so turn it off against a tight
+    # free-tier quota.
+    lab_report_letterhead_pass: bool = True
+
+    # Retry ONE chunk per document whose extraction returned almost nothing
+    # despite the chunk carrying real text. MEASURED: three identical uploads
+    # of one scanned report returned 56, 1 and 60 values — about a third of
+    # attempts collapse silently, with no error to detect them by. Charged to
+    # the RECOVERY budget, capped at one retry so the letterhead pass keeps
+    # its call.
+    extraction_empty_retry: bool = True
+
+    # Whether the letterhead pass also receives a raster of page one. A lab's
+    # masthead is often a GRAPHIC, so lab_email / lab_address / cin are absent
+    # from a born-digital PDF's text layer entirely (MEASURED: 5 of 9 golden
+    # letterhead fields on one report were not in the 2,679 characters being
+    # sent). Turning this off is also how the benchmark isolates the effect of
+    # the image from model-to-model variance — same code, one flag.
+    letterhead_vision: bool = True
+
+    # documents/classifier.py's classify_locally_scored() answers with a
+    # confidence; at or above this it is trusted and NO classification LLM
+    # call is made at all. Below it, the real LLM classifier is asked. 0.70
+    # means "several independent signals agree" — see that function's
+    # docstring; the score is a bounded sum of signals, not a probability.
+    local_classification_min_confidence: float = 0.70
+
     database_url: str = "sqlite:///./nabl.db"
     storage_dir: str = "./storage"
 
@@ -96,6 +184,38 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.85
 
     cors_origins: list[str] = ["http://localhost:5173"]
+
+
+    @field_validator("storage_dir", "qdrant_storage_dir")
+    @classmethod
+    def _anchor_dir(cls, value: str) -> str:
+        """Resolve a relative directory against backend/, not the process CWD.
+
+        These defaults are written as "./storage" and "./qdrant_storage", which
+        silently meant a DIFFERENT directory depending on where you happened to
+        launch from: running a script from backend/scripts/ created a second,
+        empty storage tree there while the server used backend/'s."""
+        path = Path(value)
+        return str(path if path.is_absolute() else (_BACKEND_DIR / path).resolve())
+
+    @field_validator("database_url")
+    @classmethod
+    def _anchor_sqlite(cls, value: str) -> str:
+        """Same for a RELATIVE sqlite path.
+
+        MEASURED: running scripts/benchmark_api.py from backend/scripts/ pointed
+        at backend/scripts/nabl.db — a brand new, empty file — and every query
+        failed with "no such table: applications", while the server was happily
+        using backend/nabl.db. An absolute URL (a test's tmp_path, a real
+        server) is left exactly as given.
+        """
+        prefix = "sqlite:///"
+        if not value.startswith(prefix):
+            return value
+        raw = value[len(prefix):]
+        if not raw or raw.startswith("/") or Path(raw).is_absolute():
+            return value  # in-memory, or already absolute
+        return prefix + str((_BACKEND_DIR / raw).resolve()).replace("\\", "/")
 
 
 @lru_cache
