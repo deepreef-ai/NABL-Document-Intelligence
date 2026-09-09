@@ -30,7 +30,7 @@ class NovaProvider(LlmProvider):
     ValidationException ("Retry your request with the ID or ARN of an
     inference profile that contains this model")."""
 
-    def __init__(self, model: str, region: str, timeout: float, name: str = "nova", max_tokens: int = 8192):
+    def __init__(self, model: str, region: str, timeout: float, name: str = "nova", max_tokens: int = 8192, temperature: float = 0.2):
         self.name = name
         self.model = model
         self.region = region
@@ -42,6 +42,10 @@ class NovaProvider(LlmProvider):
         # with a genuinely long results table (hundreds of test rows) needs
         # real headroom here, not just enough for a short chat reply.
         self.max_tokens = max_tokens
+        # Settable so the graph can pin 0.0. Left hardcoded, the SAME
+        # document filled six named form slots on one run and none on the
+        # next, and no amount of prompt work makes that reproducible.
+        self.temperature = temperature
         self._client = None
 
     def _get_client(self):
@@ -80,7 +84,7 @@ class NovaProvider(LlmProvider):
                 modelId=self.model,
                 system=[{"text": system}],
                 messages=[{"role": "user", "content": content}],
-                inferenceConfig={"temperature": 0.2, "maxTokens": self.max_tokens},
+                inferenceConfig={"temperature": self.temperature, "maxTokens": self.max_tokens},
             )
         except (BotoCoreError, ClientError) as exc:
             raise classify_boto_error(self.name, exc) from exc
@@ -119,12 +123,16 @@ class GeminiProvider(LlmProvider):
     _MAX_ATTEMPTS = 3
     _RETRY_WAIT_SECONDS = 10.0
 
-    def __init__(self, api_key: str, model: str, timeout: float, name: str = "gemini", max_tokens: int = 8192):
+    def __init__(self, api_key: str, model: str, timeout: float, name: str = "gemini", max_tokens: int = 8192, temperature: float = 0.2):
         self.name = name
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
+        # Settable so the graph can pin 0.0. Left hardcoded, the SAME
+        # document filled six named form slots on one run and none on the
+        # next, and no amount of prompt work makes that reproducible.
+        self.temperature = temperature
 
     def generate(
         self,
@@ -143,7 +151,7 @@ class GeminiProvider(LlmProvider):
                 }
             })
 
-        generation_config: dict = {"temperature": 0.2, "maxOutputTokens": self.max_tokens}
+        generation_config: dict = {"temperature": self.temperature, "maxOutputTokens": self.max_tokens}
         if want_json:
             # Gemini's own JSON mode. json_utils.parse_json_object still runs on
             # the result — same defensive contract every provider has, since a
@@ -232,12 +240,16 @@ class GroqProvider(LlmProvider):
     _MAX_ATTEMPTS = 3
     _RETRY_WAIT_SECONDS = 10.0
 
-    def __init__(self, api_key: str, model: str, timeout: float, name: str = "groq", max_tokens: int = 8192):
+    def __init__(self, api_key: str, model: str, timeout: float, name: str = "groq", max_tokens: int = 8192, temperature: float = 0.2):
         self.name = name
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
+        # Settable so the graph can pin 0.0. Left hardcoded, the SAME
+        # document filled six named form slots on one run and none on the
+        # next, and no amount of prompt work makes that reproducible.
+        self.temperature = temperature
 
     def generate(
         self,
@@ -262,7 +274,7 @@ class GroqProvider(LlmProvider):
                 {"role": "system", "content": system},
                 {"role": "user", "content": content},
             ],
-            "temperature": 0.2,
+            "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
         if want_json:

@@ -47,6 +47,14 @@ class Document(Base):
     # any more (see documents/pipeline.py), so this is how the review UI
     # can show whether a 17-page scan really was read end to end.
     page_count: Mapped[int | None] = mapped_column(nullable=True)
+    # The document in the gold dataset's shape (document_info, lab_info, ...,
+    # tests[]). Stored whole rather than reassembled from extracted_fields on
+    # request: the rows there have been through review edits, and what a person
+    # downloads as "the extraction" should be one coherent record, not a
+    # reconstruction that drifts from what the graph actually decided.
+    structured_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Result-table rows, one dict per analyte, columns kept separate.
+    tests_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # "uploaded" -> "processing" -> "extracted" -> "failed"
     status: Mapped[str] = mapped_column(String, default="uploaded")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -71,6 +79,15 @@ class ExtractedField(Base):
     # "llm" | "rule_based" | "verification" — see documents/grounding.py's
     # FieldResult and documents/extraction_report.py.
     source: Mapped[str] = mapped_column(String, default="llm")
+    # The sub-heading this field sits under in the source document —
+    # "URINE CHEMISTRY", "Senior Management". Carried through so the review
+    # screen can group fields the way the document itself does rather than
+    # showing one flat list. Nullable: rows written before this existed.
+    section: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Which gold-dataset section this field belongs to — "lab_info",
+    # "patient_info", "signatories". Named field_group because `group`
+    # is a reserved word in SQL.
+    field_group: Mapped[str | None] = mapped_column(String, nullable=True)
     accepted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     document: Mapped[Document] = relationship(back_populates="fields")

@@ -190,7 +190,11 @@ class Settings(BaseSettings):
     # flagged yellow/red for mandatory human review, per the HITL spec.
     confidence_threshold: float = 0.85
 
-    cors_origins: list[str] = ["http://localhost:5173"]
+    # Both spellings of the dev host. A browser treats http://localhost:5173
+    # and http://127.0.0.1:5173 as different origins, so allowing only one
+    # makes the UI silently fail to reach the API depending on how the dev
+    # server happened to be started.
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 
     @field_validator("storage_dir", "qdrant_storage_dir")

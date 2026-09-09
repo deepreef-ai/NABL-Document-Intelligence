@@ -91,6 +91,37 @@ def _absorb_open_duplicates(fields: list[FieldResult], *, mapped_start: int) -> 
     fields[:] = [r for i, r in enumerate(open_rows) if i not in absorbed] + mapped
 
 
+def _summarise_reasoning(reasoning: str, limit: int = 400) -> str:
+    """Collapse a " | "-joined reason list that repeats the same kind of item.
+
+    MEASURED on a filled application form: the decision node produced five
+    `ambiguous_mapping:` segments differing only by which slot was ambiguous,
+    and the reviewer got a wall of text saying one thing five times. Segments
+    are grouped by the text before their first ":", the first of each kind is
+    kept verbatim, and the rest become a count.
+    """
+    segments = [seg.strip() for seg in (reasoning or "").split("|") if seg.strip()]
+    if not segments:
+        return ""
+
+    kept: list[str] = []
+    seen: dict[str, int] = {}
+    for seg in segments:
+        kind = seg.split(":", 1)[0].strip().lower()
+        seen[kind] = seen.get(kind, 0) + 1
+        if seen[kind] == 1:
+            kept.append(seg)
+
+    for kind, count in seen.items():
+        if count > 1:
+            for i, seg in enumerate(kept):
+                if seg.split(":", 1)[0].strip().lower() == kind:
+                    kept[i] = f"{seg} (and {count - 1} more like it)"
+                    break
+
+    return " | ".join(kept)[:limit]
+
+
 def _to_api_page(page_number: int | None) -> int | None:
     """Graph page numbers are 1-based; the API's `source_page` is 0-based.
 
@@ -253,6 +284,8 @@ def run_graph_pipeline(
     # senior-management roles, none of whom the document names. Highest
     # confidence first, so the slot that keeps the value is the best-supported.
     claimed: dict[str, str] = {}
+    # winning slot -> the slots that wanted the same value
+    displaced: dict[str, list[str]] = {}
     for m in sorted(result.form_mappings, key=lambda x: -x.mapping_confidence):
         if m.mapping_status not in (MappingStatus.MAPPED, MappingStatus.PARTIALLY_MAPPED):
             continue
@@ -264,9 +297,12 @@ def run_graph_pipeline(
         if key and not repeating:
             already = claimed.get(key)
             if already is not None and already != m.target_field:
-                warnings.append(
-                    f"{m.target_field} left empty: the same value already fills {already}"
-                )
+                # Collected, not appended one line at a time. A single lab
+                # email is a candidate for organisation.email AND all four
+                # senior-management roles, so this fired five times and the
+                # notes panel became five near-identical sentences about one
+                # fact. Summarised once below.
+                displaced.setdefault(already, []).append(m.target_field)
                 continue
             claimed[key] = m.target_field
 
@@ -315,7 +351,10 @@ def run_graph_pipeline(
             FinalStatus.MANUAL_REVIEW_REQUIRED: "Needs a closer look",
             FinalStatus.REJECTED: "Extraction rejected",
         }.get(result.overall_status, result.overall_status.value)
-        warnings.append(f"{label}: {result.final_reasoning[:400]}")
+        # final_reasoning is a " | "-joined list from the decision node and
+        # repeats itself: five ambiguous_mapping segments differing only by
+        # slot name. Keep the first of each kind, count the rest.
+        warnings.append(f"{label}: {_summarise_reasoning(result.final_reasoning)}")
     if result.failed_chunks:
         warnings.append(
             f"{len(result.failed_chunks)} chunk(s) failed; pages they cover may be incomplete"
@@ -352,8 +391,18 @@ def run_graph_pipeline(
         "completed_application_form" if mapped_count
         else (result.document_summary.document_type or "other")
     )
-    if mapped_count:
-        warnings.insert(0, f"{mapped_count} value(s) mapped into named form fields")
+    if displaced:
+        total = sum(len(v) for v in displaced.values())
+        holders = ", ".join(sorted(displaced))
+        warnings.append(
+            f"{total} form slot(s) left empty because their value already fills "
+            f"{holders} — one reading of one value fills one slot"
+        )
+
+    # NOT added to warnings: "N value(s) mapped into named form fields" is good
+    # news, and the review screen prints this list under a red "Extraction
+    # notes" heading. A success reported as a warning teaches a reviewer to
+    # distrust the whole panel. The count is visible in the fields themselves.
 
     return PipelineResult(
         doc_type=compiled_doc_type,

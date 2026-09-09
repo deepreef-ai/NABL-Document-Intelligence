@@ -51,6 +51,12 @@ def get_compiled_form(application_id: str, accepted_only: bool = False, db: Sess
                         "needs_review": f.confidence < threshold,
                         "source_page": f.source_page,
                         "source_bbox": f.source_bbox,
+                        # The sub-heading the field sat under in the source
+                        # document. The review screen files each field under
+                        # it, so leaving it out here collapsed every section
+                        # into one unlabelled block however well it was read.
+                        "section": f.section,
+                        "group": f.field_group,
                         "accepted": f.accepted,
                     }
                     for f in d.fields

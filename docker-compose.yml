@@ -1,0 +1,95 @@
+# Development / single-node deployment for the agentic extraction workflow.
+#
+# Postgres is included but the app defaults to SQLite: GRAPH_DATABASE_URL is
+# what switches it, and it is commented out below so `docker compose up` works
+# before anyone has thought about databases. Uncomment it (and the
+# langgraph-checkpoint-postgres line in requirements.txt) for a real
+# deployment — the checkpointer follows the same URL automatically.
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: nabl-graph-api:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # --- LLM: Nova primary, Gemini as the fallback link -------------------
+      GRAPH_PROVIDER_ORDER: "nova,gemini"
+      NOVA_MODEL: "${NOVA_MODEL:-us.amazon.nova-2-lite-v1:0}"
+      NOVA_REGION: "${NOVA_REGION:-us-east-1}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-3.6-flash}"
+      # Nova authenticates via the ambient AWS chain, not an API key.
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+
+      # --- storage -----------------------------------------------------------
+      GRAPH_SQLITE_PATH: /app/graph_storage/graph.db
+      CHECKPOINT_DB_PATH: /app/graph_storage/checkpoints.db
+      # GRAPH_DATABASE_URL: postgresql://nabl:nabl@postgres:5432/nabl_graph
+
+      # --- workflow tuning -----------------------------------------------------
+      MAX_CHUNK_CHARS: "24000"
+      MAX_CONCURRENT_LLM_CALLS: "4"
+      MAX_REQUESTS_PER_MINUTE: "60"
+      MAX_ATTEMPTS_PER_CHUNK: "3"
+      HUMAN_REVIEW_ENABLED: "true"
+      INTERRUPT_FOR_HUMAN_REVIEW: "false"
+    volumes:
+      # Named volume, not a bind mount: uploads and checkpoints must survive a
+      # container rebuild, which is the whole point of resumability.
+      - graph_storage:/app/graph_storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/graph/health',timeout=8).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          # OCR rasterises pages at 200 DPI; a large scanned PDF is genuinely
+          # memory-hungry and an unbounded container will get OOM-killed
+          # mid-document rather than degrading.
+          memory: 4G
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nabl
+      POSTGRES_PASSWORD: nabl
+      POSTGRES_DB: nabl_graph
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nabl -d nabl_graph"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  frontend:
+    build:
+      context: ./frontend
+    image: nabl-graph-ui:latest
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    environment:
+      VITE_API_BASE: "http://localhost:8000"
+    depends_on:
+      - api
+    profiles: ["ui"]
+
+volumes:
+  graph_storage:
+  pgdata:

@@ -8,6 +8,7 @@ without a model in the loop.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.graph.nodes.chunking import create_chunks
 from app.graph.nodes.completeness import check_completeness
@@ -213,6 +214,30 @@ def _f(**kw) -> ExtractedField:
     )
     base.update(kw)
     return ExtractedField(**base)
+
+
+class TestExtractedFieldNameCoercion:
+    """MEASURED: 'VU3 cytology (positive) CLN' and
+    '1616659113-Test-Result-on-Beta-Casein-Certification' both crashed their
+    whole document with AttributeError: 'int' object has no attribute
+    'strip' — the LLM emitted a bare number as a field_name (e.g. a numbered
+    cytology finding) and the old validator called .strip() on it directly."""
+
+    def test_numeric_field_name_is_coerced_to_a_string_not_crashed_on(self):
+        f = _f(field_name=3)
+        assert f.field_name == "3"
+
+    def test_float_field_name_is_coerced_to_a_string(self):
+        f = _f(field_name=2024.0)
+        assert f.field_name == "2024.0"
+
+    def test_blank_field_name_is_still_rejected(self):
+        with pytest.raises(ValidationError):
+            _f(field_name="   ")
+
+    def test_none_field_name_is_still_rejected(self):
+        with pytest.raises(ValidationError):
+            _f(field_name=None)
 
 
 class TestResponseValidation:

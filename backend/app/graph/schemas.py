@@ -136,12 +136,20 @@ class ExtractedField(BaseModel):
         except (TypeError, ValueError):
             return 0.0
 
-    @field_validator("field_name")
+    @field_validator("field_name", mode="before")
     @classmethod
-    def _nonempty(cls, v: str) -> str:
-        if not (v or "").strip():
+    def _nonempty(cls, v: Any) -> str:
+        # mode="before": the LLM sometimes emits a bare number as a field
+        # name (e.g. a cytology finding numbered "3" rather than a label) —
+        # MEASURED: 'VU3 cytology (positive) CLN' crashed the whole document
+        # with AttributeError: 'int' object has no attribute 'strip'
+        # because the old (v or "").strip() called .strip() on that raw int.
+        # Coercing to str first turns a crash into a usable (if odd) field
+        # name instead of losing the whole chunk's extraction over one field.
+        text = "" if v is None else str(v).strip()
+        if not text:
             raise ValueError("field_name must not be empty")
-        return v.strip()
+        return text
 
     @property
     def is_usable(self) -> bool:

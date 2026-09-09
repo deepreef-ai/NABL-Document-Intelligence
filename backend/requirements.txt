@@ -37,3 +37,13 @@ pytest==8.3.3
 # .xlsx export for the benchmark's field/test comparison workbook
 # (scripts/generate_predictions_and_score.py's write_excel_workbook).
 openpyxl==3.1.5
+
+# --- Agentic extraction workflow (app/graph/) --------------------------------
+# LangGraph orchestrates the multi-agent document workflow: a shared typed
+# state, conditional routing, bounded retry loops and a checkpoint after every
+# node (which is what makes a long run resumable rather than restartable).
+langgraph==1.2.11
+# SQLite checkpointer. Swap for langgraph-checkpoint-postgres in production —
+# app/graph/graph.py's build_checkpointer() is the only place that changes.
+langgraph-checkpoint-sqlite==3.1.1
+langchain-core==1.6.2

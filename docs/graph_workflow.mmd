@@ -1,0 +1,57 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	start(start)
+	document_validation(document_validation)
+	preprocessing(preprocessing)
+	document_analysis(document_analysis)
+	chunk_management(chunk_management)
+	dynamic_extraction(dynamic_extraction)
+	response_validation(response_validation)
+	retry_recovery(retry_recovery)
+	evidence_validation(evidence_validation)
+	field_normalization(field_normalization)
+	conflict_resolution(conflict_resolution)
+	completeness_check(completeness_check)
+	targeted_reanalysis(targeted_reanalysis)
+	form_mapping(form_mapping)
+	form_filling(form_filling)
+	human_review(human_review)
+	quality_control(quality_control)
+	final_decision(final_decision)
+	persistence(persistence)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> start;
+	chunk_management -.-> dynamic_extraction;
+	chunk_management -.-> final_decision;
+	completeness_check -.-> form_mapping;
+	completeness_check -.-> targeted_reanalysis;
+	conflict_resolution --> completeness_check;
+	document_analysis --> chunk_management;
+	document_validation -.-> final_decision;
+	document_validation -.-> preprocessing;
+	dynamic_extraction --> response_validation;
+	evidence_validation --> field_normalization;
+	field_normalization --> conflict_resolution;
+	final_decision --> persistence;
+	form_filling -.-> human_review;
+	form_filling -.-> quality_control;
+	form_mapping --> form_filling;
+	human_review --> quality_control;
+	preprocessing -.-> document_analysis;
+	preprocessing -.-> final_decision;
+	quality_control --> final_decision;
+	response_validation -.-> evidence_validation;
+	response_validation -.-> retry_recovery;
+	retry_recovery -.-> dynamic_extraction;
+	retry_recovery -.-> evidence_validation;
+	start --> document_validation;
+	targeted_reanalysis --> dynamic_extraction;
+	persistence --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

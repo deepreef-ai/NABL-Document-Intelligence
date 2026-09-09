@@ -118,6 +118,22 @@ Use "fields" for everything that is NOT a measurement: the lab, the patient,
 the client, the sample, the report's own identifiers and dates, narrative
 sections.
 
+A CHART IS A RESULTS TABLE, once you know which numbers are which. Where the
+text contains a block beginning "[chart]", it has already been read for you:
+
+- The numbers on its AXES are the scale of the picture, never readings. On a
+  real HbA1c chart the y-axis runs 7.52 / 5.64 / 3.76 / 1.88 while the
+  patient's readings were 5.6, 5.4, 5.5, 4.8 and 5.0. Reporting 7.52 as the
+  result is a WRONG measurement, which is worse than a missing one.
+- The lines under "Readings plotted on this chart" ARE results. Put each one
+  in "tests" as its own row: the chart's name as both panel_name and
+  test_name, the number as "result", the unit as "unit", and the date as
+  "sample_date". They are a series of the same test over time, so they share a
+  name and differ by date — that is not a duplicate.
+- Do NOT invent readings for the x-axis labels the block says have no readable
+  value. A date with no number against it is a gap, and filling it guesses a
+  patient's result.
+
 Two parts of a page are routinely missed because they do not look like a
 labelled field. Both belong in "fields":
 

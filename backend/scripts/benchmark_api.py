@@ -171,13 +171,24 @@ def find_source(dataset_dir: Path, filename: str) -> Path | None:
 
 # --------------------------------------------------------------------------- shaping the response
 
-def split_response(fields: list[dict]) -> tuple[dict, list[dict]]:
-    """The API returns one flat list. Rebuild it into the golden record's shape:
-    a {name: value} map plus a list of test rows, regrouped by their index."""
+def split_response(document: dict) -> tuple[dict, list[dict]]:
+    """Rebuild the API response into the golden record's shape: a {name: value}
+    map plus a list of test rows.
+
+    Test rows come from the response's own `tests` array, which is already the
+    labelled dataset's shape — one dict per analyte with result, unit and
+    reference_range kept as separate columns.
+
+    The indexed-path fallback below is for the LEGACY extraction path, which
+    had no `tests` array and flattened a results table into field paths like
+    "tests[0].result". Reading only that shape is what made this harness score
+    a document whose table WAS read correctly as 80 misses: the rows were in
+    the response the whole time, in the field the harness never looked at.
+    """
     flat: dict[str, str] = {}
     rows: dict[int, dict] = defaultdict(dict)
 
-    for f in fields:
+    for f in document.get("fields") or []:
         path, value = f.get("field_path") or "", f.get("value")
         if value is None:
             continue
@@ -186,7 +197,11 @@ def split_response(fields: list[dict]) -> tuple[dict, list[dict]]:
             rows[int(match.group(2))][match.group(3)] = value
         elif not match:
             flat[path] = value
-    return flat, [rows[i] for i in sorted(rows)]
+
+    tests = [t for t in (document.get("tests") or []) if t]
+    if not tests:
+        tests = [rows[i] for i in sorted(rows)]
+    return flat, tests
 
 
 # --------------------------------------------------------------------------- reading the golden record
@@ -533,7 +548,7 @@ def main() -> int:
             failures.append((stem, f"{type(exc).__name__}: {exc}"))
             continue
 
-        pred_fields, pred_tests = split_response(document.get("fields") or [])
+        pred_fields, pred_tests = split_response(document)
         rows = (score_fields(stem, gold_fields(gold), pred_fields, args.strict_keys)
                 + score_tests(stem, gold_tests(gold), pred_tests, args.strict_keys))
         all_rows.extend(rows)

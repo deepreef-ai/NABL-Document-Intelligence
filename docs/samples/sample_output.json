@@ -1,0 +1,356 @@
+{
+  "overall_status": "VALIDATED",
+  "document_summary": {
+    "document_type": "milk analysis report",
+    "page_count": 2,
+    "processed_pages": 2,
+    "processed_chunks": 1,
+    "failed_chunks": 0,
+    "ocr_pages": 0
+  },
+  "extracted_fields": [
+    {
+      "field_name": "Report No",
+      "normalized_field_name": "report_no",
+      "value": "LR-2024-0195",
+      "normalized_value": "LR-2024-0195",
+      "data_type": "string",
+      "page_number": 1,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Header",
+      "table_context": "",
+      "exact_source_evidence": "Report No: LR-2024-0195",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "295eaf6bdc06bba3"
+    },
+    {
+      "field_name": "Sample Name",
+      "normalized_field_name": "sample_name",
+      "value": "Cow Milk",
+      "normalized_value": "Cow Milk",
+      "data_type": "string",
+      "page_number": 1,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Header",
+      "table_context": "",
+      "exact_source_evidence": "Sample Name: Cow Milk",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "be47b91e2fc94499"
+    },
+    {
+      "field_name": "Collected On",
+      "normalized_field_name": "collected_on",
+      "value": "12/03/2024",
+      "normalized_value": "12/03/2024",
+      "data_type": "date",
+      "page_number": 1,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Header",
+      "table_context": "",
+      "exact_source_evidence": "Collected On: 12/03/2024",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "fc99cce28453638b"
+    },
+    {
+      "field_name": "Fat",
+      "normalized_field_name": "fat",
+      "value": "4.2 %",
+      "normalized_value": "4.2 %",
+      "data_type": "string",
+      "page_number": 2,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Results",
+      "table_context": "",
+      "exact_source_evidence": "Fat: 4.2 %",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "27ac76689e062ab0"
+    },
+    {
+      "field_name": "Protein",
+      "normalized_field_name": "protein",
+      "value": "3.4 g/100ml",
+      "normalized_value": "3.4 g/100ml",
+      "data_type": "string",
+      "page_number": 2,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Results",
+      "table_context": "",
+      "exact_source_evidence": "Protein: 3.4 g/100ml",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "5b48f93aab5362c3"
+    },
+    {
+      "field_name": "SNF",
+      "normalized_field_name": "snf",
+      "value": "8.6 %",
+      "normalized_value": "8.6 %",
+      "data_type": "string",
+      "page_number": 2,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Results",
+      "table_context": "",
+      "exact_source_evidence": "SNF: 8.6 %",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "d7c3aeb8f0928c7e"
+    },
+    {
+      "field_name": "Analyst",
+      "normalized_field_name": "analyst",
+      "value": "R. Menon",
+      "normalized_value": "R. Menon",
+      "data_type": "string",
+      "page_number": 2,
+      "chunk_id": "sample-001::c0001",
+      "section_name": "Results",
+      "table_context": "",
+      "exact_source_evidence": "Analyst: R. Menon",
+      "confidence_score": 0.96,
+      "extraction_status": "VERIFIED",
+      "notes": "",
+      "evidence_status": "SUPPORTED",
+      "occurrence_index": 0,
+      "merged_from": [],
+      "field_uid": "37573404ea80d0b9"
+    }
+  ],
+  "form_mappings": [
+    {
+      "source_field": "report_no",
+      "target_field": "report.number",
+      "mapped_value": "LR-2024-0195",
+      "mapping_confidence": 0.94,
+      "source_page": 1,
+      "source_evidence": "Report No: LR-2024-0195",
+      "mapping_reason": "'Report No' is this document's identifier, which is what report.number asks for",
+      "mapping_status": "MAPPED",
+      "source_field_uid": "295eaf6bdc06bba3"
+    },
+    {
+      "source_field": "fat",
+      "target_field": "analysis.fat_percent",
+      "mapped_value": "4.2 %",
+      "mapping_confidence": 0.93,
+      "source_page": 2,
+      "source_evidence": "Fat: 4.2 %",
+      "mapping_reason": "'Fat' is reported as a percentage, matching fat_percent",
+      "mapping_status": "MAPPED",
+      "source_field_uid": "27ac76689e062ab0"
+    },
+    {
+      "source_field": "",
+      "target_field": "analysis.moisture",
+      "mapped_value": null,
+      "mapping_confidence": 0.0,
+      "source_page": null,
+      "source_evidence": "",
+      "mapping_reason": "the document reports no moisture value",
+      "mapping_status": "NOT_FOUND",
+      "source_field_uid": ""
+    }
+  ],
+  "filled_form": {
+    "report": {
+      "number": "LR-2024-0195"
+    },
+    "analysis": {
+      "fat_percent": "4.2 %"
+    }
+  },
+  "missing_fields": [
+    "analysis.moisture"
+  ],
+  "conflicts": [],
+  "failed_chunks": [],
+  "manual_review_items": [],
+  "quality_control": {
+    "all_pages_processed": true,
+    "all_chunks_processed": true,
+    "all_values_have_evidence": true,
+    "conflicts_resolved": true,
+    "form_mapping_verified": true,
+    "information_loss_detected": false
+  },
+  "final_reasoning": "all 2 page(s) processed, all chunks accounted for, 7 of 7 field(s) verified against source evidence | 2 target form field(s) filled from verified values",
+  "audit_log": [
+    {
+      "timestamp": "2026-09-08T06:31:32.652256Z",
+      "node": "start",
+      "event": "workflow_started",
+      "detail": "document sample-001",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.693844Z",
+      "node": "document_validation",
+      "event": "validated",
+      "detail": "sample_milk_report.pdf (pdf, 2 KB, 2 page(s))",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.782207Z",
+      "node": "preprocessing",
+      "event": "preprocessed",
+      "detail": "2 page(s): 2 readable, 0 via OCR, 0 unreadable",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.786518Z",
+      "node": "document_analysis",
+      "event": "analysed",
+      "detail": "type='milk analysis report', 1 section(s), 3 candidate field(s), 0 repeating entity type(s)",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.787627Z",
+      "node": "chunk_management",
+      "event": "chunked",
+      "detail": "1 chunk(s) covering 2/2 page(s); 1 need extraction, 0 empty",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.792272Z",
+      "node": "dynamic_extraction",
+      "event": "chunk_extracted",
+      "detail": "7 field(s)",
+      "page_number": null,
+      "chunk_id": "sample-001::c0001",
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.792272Z",
+      "node": "dynamic_extraction",
+      "event": "extraction_round_complete",
+      "detail": "1 chunk(s) attempted, 0 failed, 7 field(s) extracted",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.792272Z",
+      "node": "response_validation",
+      "event": "responses_validated",
+      "detail": "7 in, 7 kept, 0 dropped, 0 duplicate(s), 0 chunk(s) requeued",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.792272Z",
+      "node": "evidence_validation",
+      "event": "evidence_validated",
+      "detail": "7 field(s): SUPPORTED=7",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "timestamp": "2026-09-08T06:31:32.792272Z",
+      "node": "field_normalization",
+      "event": "semantic_merge",
+      "detail": "0 group(s) merged, 0 vetoed, from 7 distinct name(s)",
+      "page_number": null,
+      "chunk_id": null,
+      "level": "info"
+    },
+    {
+      "note": "... 9 further entries omitted for readability"
+    }
+  ],
+  "metrics": {
+    "llm_call_count": 4,
+    "retry_count": 0,
+    "processing_time_seconds": 0.16,
+    "token_usage": {
+      "input": 7200,
+      "output": 1280,
+      "total": 8480
+    },
+    "node_durations": {},
+    "calls": [
+      {
+        "node": "document_analysis",
+        "model": "us.amazon.nova-2-lite-v1:0",
+        "provider": "nova",
+        "latency_seconds": 1.2,
+        "input_tokens": 1800,
+        "output_tokens": 320,
+        "ok": true,
+        "error": "",
+        "attempt": 1
+      },
+      {
+        "node": "dynamic_extraction",
+        "model": "us.amazon.nova-2-lite-v1:0",
+        "provider": "nova",
+        "latency_seconds": 1.2,
+        "input_tokens": 1800,
+        "output_tokens": 320,
+        "ok": true,
+        "error": "",
+        "attempt": 1
+      },
+      {
+        "node": "field_normalization",
+        "model": "us.amazon.nova-2-lite-v1:0",
+        "provider": "nova",
+        "latency_seconds": 1.2,
+        "input_tokens": 1800,
+        "output_tokens": 320,
+        "ok": true,
+        "error": "",
+        "attempt": 1
+      },
+      {
+        "node": "form_mapping",
+        "model": "us.amazon.nova-2-lite-v1:0",
+        "provider": "nova",
+        "latency_seconds": 1.2,
+        "input_tokens": 1800,
+        "output_tokens": 320,
+        "ok": true,
+        "error": "",
+        "attempt": 1
+      }
+    ]
+  }
+}

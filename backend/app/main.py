@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.db import init_db
 from app.llm.base import LlmNotConfigured, LlmProviderError
-from app.routers import chat, documents, review, wizard
+from app.routers import chat, documents, graph_documents, review, wizard
 
 settings = get_settings()
 
@@ -35,6 +35,13 @@ async def handle_llm_provider_error(request: Request, exc: LlmProviderError) -> 
 def on_startup() -> None:
     init_db()
 
+    # The graph keeps its own audit store (runs, fields, mappings,
+    # conflicts, errors, audit), separate from the app's operational
+    # tables: different lifecycle, different retention.
+    from app.graph.database import init_db as init_graph_db
+
+    init_graph_db()
+
 
 @app.get("/health")
 def health() -> dict:
@@ -45,3 +52,4 @@ app.include_router(wizard.router)
 app.include_router(documents.router)
 app.include_router(review.router)
 app.include_router(chat.router)
+app.include_router(graph_documents.router)

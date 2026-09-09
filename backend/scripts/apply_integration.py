@@ -22,15 +22,50 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND = os.path.abspath(os.path.join(ROOT, "..", "frontend"))
+SNAPSHOTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "integration_snapshots")
 
 
 class Edit:
-    def __init__(self, path: str, name: str, marker: str, anchor: str, replacement: str):
+    def __init__(self, path: str, name: str, marker: str, anchor: str, replacement: str,
+                 count: int = 1):
         self.path = path
         self.name = name
         self.marker = marker      # present => already applied
         self.anchor = anchor      # text to replace
         self.replacement = replacement
+        # How many occurrences to replace. The provider temperature edit lands
+        # in three constructors that are textually identical, and replacing
+        # only the first left Gemini and Groq still hardcoded.
+        self.count = count
+
+    def present(self, text: str) -> bool:
+        return self.marker in text
+
+
+class Snapshot:
+    """A file that reverts WHOLESALE rather than losing one line.
+
+    MEASURED: ReviewPage.tsx, client.ts and App.css came back as much older
+    versions — App.css had lost every `rg-*` rule, not just the ones added
+    last. Anchored edits cannot repair that: the anchors they need are
+    themselves gone. So these files keep a pristine copy and are restored from
+    it.
+
+    Restoring only happens when the marker is ABSENT, i.e. the file has
+    demonstrably lost the integration. A file that still has the marker is
+    left alone however much else it has changed, so ordinary work on it is
+    never clobbered. After deliberately changing one of these files, run
+    `--snapshot` to record the new intended content.
+    """
+
+    def __init__(self, path: str, name: str, marker: str):
+        self.path = path
+        self.name = name
+        self.marker = marker
+
+    @property
+    def store(self) -> str:
+        return os.path.join(SNAPSHOTS, os.path.basename(self.path))
 
     def present(self, text: str) -> bool:
         return self.marker in text
@@ -105,9 +140,39 @@ EDITS: list[Edit] = [
     # one run and none on the next. app/graph/llm.py pins it to 0.0.
     Edit(
         os.path.join(ROOT, "app", "llm", "providers.py"),
-        "providers.py: temperature parameter", "temperature: float = 0.2",
-        "                 max_tokens: int = 8192):",
-        "                 max_tokens: int = 8192, temperature: float = 0.2):",
+        "providers.py: temperature parameter", "temperature: float = 0.2)",
+        "max_tokens: int = 8192):",
+        "max_tokens: int = 8192, temperature: float = 0.2):",
+        count=3,
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "llm", "providers.py"),
+        "providers.py: store temperature", "self.temperature = temperature",
+        "self.max_tokens = max_tokens",
+        "self.max_tokens = max_tokens\n"
+        "        # Settable so the graph can pin 0.0. Left hardcoded, the SAME\n"
+        "        # document filled six named form slots on one run and none on the\n"
+        "        # next, and no amount of prompt work makes that reproducible.\n"
+        "        self.temperature = temperature",
+        count=3,
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "llm", "providers.py"),
+        "providers.py: nova uses it", '"temperature": self.temperature, "maxTokens"',
+        'inferenceConfig={"temperature": 0.2, "maxTokens": self.max_tokens}',
+        'inferenceConfig={"temperature": self.temperature, "maxTokens": self.max_tokens}',
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "llm", "providers.py"),
+        "providers.py: gemini uses it", '"temperature": self.temperature, "maxOutputTokens"',
+        'generation_config: dict = {"temperature": 0.2, "maxOutputTokens": self.max_tokens}',
+        'generation_config: dict = {"temperature": self.temperature, "maxOutputTokens": self.max_tokens}',
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "llm", "providers.py"),
+        "providers.py: groq uses it", '            "temperature": self.temperature,',
+        '            "temperature": 0.2,\n',
+        '            "temperature": self.temperature,\n',
     ),
 
     # ---- backend: the source sub-heading reaches the review screen ---------
@@ -193,17 +258,113 @@ EDITS: list[Edit] = [
         '                        "section": f.section,\n'
         '                        "group": f.field_group,',
     ),
+    # ---- backend: the gold-shaped record ------------------------------------
+    # The labelled_dataset shape is the output format. These carry it out of
+    # the graph and into the API: without them the review form classifies for
+    # itself and the exported JSON disagrees with what is on screen.
     Edit(
-        os.path.join(ROOT, "app", "documents", "pipeline.py"),
-        "pipeline.py: real filename to the graph", "display_name=filename",
-        "            return run_graph_pipeline(tmp_path, document_id=document_id, form_type=form_type)",
-        "            # `filename` is the upload's own name; tmp_path is where it was\n"
-        "            # staged. Without this the gold-shaped output recorded\n"
-        '            # original_filename as "tmpn0yclbyd.pdf".\n'
-        "            return run_graph_pipeline(\n"
-        "                tmp_path, document_id=document_id, form_type=form_type,\n"
-        "                display_name=filename,\n"
-        "            )",
+        os.path.join(ROOT, "app", "documents", "grounding.py"),
+        "grounding.py: FieldResult.group", "group: str = \"\"",
+        '    section: str = ""',
+        '    section: str = ""\n'
+        '    #: Which gold-dataset section this field belongs to — "lab_info",\n'
+        '    #: "patient_info", "signatories". app/graph/structured.py\'s\n'
+        "    #: route_field is the one place that decides; carrying the answer here\n"
+        "    #: keeps the review form and the exported JSON filing the same field in\n"
+        "    #: the same place.\n"
+        '    group: str = ""',
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "documents", "grounding.py"),
+        "grounding.py: PipelineResult.tests", "structured: dict = field(default_factory=dict)",
+        "    page_count: int | None = None",
+        "    page_count: int | None = None\n"
+        "    # Result-table rows in the gold dataset's shape: one dict per analyte\n"
+        "    # with test_name / result / unit / reference_range kept SEPARATE. A\n"
+        "    # results table is not a list of fields — flattened into scalars it\n"
+        '    # becomes ph = "6.5 5-9", with nothing left to sort or compare.\n'
+        "    tests: list[dict] = field(default_factory=list)\n"
+        "    # The whole document in the gold dataset's shape, ready to diff\n"
+        "    # against a labelled record.\n"
+        "    structured: dict = field(default_factory=dict)",
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "models.py"),
+        "models.py: structured/tests columns", "structured_json: Mapped[dict | None]",
+        '    # "uploaded" -> "processing" -> "extracted" -> "failed"\n'
+        '    status: Mapped[str] = mapped_column(String, default="uploaded")',
+        "    # The document in the gold dataset's shape. Stored whole rather than\n"
+        "    # reassembled from extracted_fields on request: those rows have been\n"
+        '    # through review edits, and what a person downloads as "the extraction"\n'
+        "    # should be one coherent record, not a reconstruction that drifts from\n"
+        "    # what the graph actually decided.\n"
+        "    structured_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)\n"
+        "    # Result-table rows, one dict per analyte, columns kept separate.\n"
+        "    tests_json: Mapped[list | None] = mapped_column(JSON, nullable=True)\n"
+        '    # "uploaded" -> "processing" -> "extracted" -> "failed"\n'
+        '    status: Mapped[str] = mapped_column(String, default="uploaded")',
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "routers", "documents.py"),
+        "documents.py: persist the gold record", "document.structured_json =",
+        '    document.error = "; ".join(result.extraction_warnings) or None\n',
+        '    document.error = "; ".join(result.extraction_warnings) or None\n'
+        "    # The gold-shaped record and its results table, stored as the pipeline\n"
+        "    # produced them. getattr keeps the legacy extraction paths working:\n"
+        "    # they build a PipelineResult without either.\n"
+        '    document.structured_json = getattr(result, "structured", None) or None\n'
+        '    document.tests_json = getattr(result, "tests", None) or None\n',
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "routers", "documents.py"),
+        "documents.py: serialise tests", '"tests": document.tests_json',
+        '        "error": document.error,\n        "fields": [',
+        '        "error": document.error,\n'
+        "        # A results table is not a list of fields, so it travels as rows\n"
+        "        # with its columns intact rather than flattened into scalars.\n"
+        '        "tests": document.tests_json or [],\n'
+        '        "fields": [',
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "routers", "documents.py"),
+        "documents.py: serialise group", '"group": f.field_group',
+        '                "section": f.section,',
+        '                "section": f.section,\n'
+        '                "group": f.field_group,',
+    ),
+    # ---- backend: unlock without the wizard ---------------------------------
+    # The upload endpoint refuses an application still in "eligibility", and
+    # the product no longer shows a start step, so without this the one screen
+    # the user has cannot accept a file.
+    Edit(
+        os.path.join(ROOT, "app", "routers", "wizard.py"),
+        "wizard.py: skip_eligibility flag", "skip_eligibility",
+        "class CreateApplicationRequest(BaseModel):\n    form_type: NablFormType\n",
+        "class CreateApplicationRequest(BaseModel):\n"
+        "    form_type: NablFormType\n"
+        "    #: Create the application already unlocked, skipping the eligibility\n"
+        '    #: wizard. The upload endpoint refuses anything still in "eligibility"\n'
+        "    #: status, so a deployment that does not present the wizard has no other\n"
+        "    #: way to reach upload. Off by default: the gate stays the norm.\n"
+        "    skip_eligibility: bool = False\n",
+    ),
+    Edit(
+        os.path.join(ROOT, "app", "routers", "wizard.py"),
+        "wizard.py: honour skip_eligibility", "Eligibility wizard skipped",
+        "    state, message = WizardEngine(db).start(application)",
+        "    if body.skip_eligibility:\n"
+        "        # Unlock without asking the prerequisite questions. The caller has\n"
+        "        # taken responsibility for eligibility; record that plainly rather\n"
+        "        # than leaving it looking as though the wizard passed.\n"
+        '        application.status = "unlocked"\n'
+        "        db.commit()\n"
+        "        db.refresh(application)\n"
+        "        return {\n"
+        '            "application": _serialize(application),\n'
+        '            "state": None,\n'
+        '            "message": "Eligibility wizard skipped; upload is unlocked.",\n'
+        "        }\n\n"
+        "    state, message = WizardEngine(db).start(application)",
     ),
     Edit(
         os.path.join(ROOT, "app", "db.py"),
@@ -217,14 +378,47 @@ EDITS: list[Edit] = [
     ),
 ]
 
+
+#: Files that come back as WHOLESALE older versions rather than losing a line.
+#: MEASURED: App.css returned with every `rg-*` rule gone, not just the newest;
+#: ReviewPage.tsx returned rendering a flat field grid from before the review
+#: form existed. There is no anchor left to repair those against, so they are
+#: restored from a pristine copy instead.
+#:
+#: The marker is the test for "has this file lost the integration". A file that
+#: still has its marker is never touched, so ordinary work on these files is
+#: safe; run `--snapshot` after deliberately changing one.
+SNAPSHOTS_TRACKED: list[Snapshot] = [
+    Snapshot(os.path.join(FRONTEND, "src", "pages", "ReviewPage.tsx"),
+             "ReviewPage.tsx: results table + JSON link", "TestResultsTable"),
+    Snapshot(os.path.join(FRONTEND, "src", "api", "client.ts"),
+             "client.ts: group, tests, structured URL", "structuredJsonUrl"),
+    Snapshot(os.path.join(FRONTEND, "src", "App.css"),
+             "App.css: review form + results table styles", "rg-subheading"),
+    Snapshot(os.path.join(FRONTEND, "src", "App.tsx"),
+             "App.tsx: two screens, upload first", 'path="/" element={<UploadPage'),
+    Snapshot(os.path.join(FRONTEND, "src", "pages", "UploadPage.tsx"),
+             "UploadPage.tsx: silently acquires an application", "DEFAULT_FORM_TYPE"),
+    Snapshot(os.path.join(ROOT, "app", "db.py"),
+             "db.py: the column migration itself", "def _add_missing_columns"),
+    Snapshot(os.path.join(ROOT, "app", "benchmark", "compare.py"),
+             "compare.py: value normalisation", "_SEPARATORS.sub"),
+    Snapshot(os.path.join(ROOT, "tests", "test_pipeline.py"),
+             "test_pipeline.py: legacy-path fixture", "_legacy_path"),
+    Snapshot(os.path.join(ROOT, "tests", "test_lab_report_extraction.py"),
+             "test_lab_report_extraction.py: import path", "from app.documents.lab_report import"),
+]
+
+
 # pipeline.py's graph branch is large enough that it lives here as a block.
 PIPELINE_MARKER = "run_graph_pipeline"
-PIPELINE_ANCHOR = """    ocr_client = ocr_client or OcrClient()
-    kind = _guess_kind(filename, content_type)
+# The anchor sits AFTER the call-budget block, not after _guess_kind: a budget
+# is created per document between the two, and anchoring above it put the graph
+# branch before the budget existed.
+PIPELINE_ANCHOR = """    budget = cb.CallBudget.from_settings(document_id)
 
     if kind == "pdf":"""
-PIPELINE_REPLACEMENT = """    ocr_client = ocr_client or OcrClient()
-    kind = _guess_kind(filename, content_type)
+PIPELINE_REPLACEMENT = """    budget = cb.CallBudget.from_settings(document_id)
 
     # The agentic LangGraph workflow (app/graph/) is the extraction path.
     # graph_pipeline_enabled is a rollback lever only: set it false to restore
@@ -246,7 +440,13 @@ PIPELINE_REPLACEMENT = """    ocr_client = ocr_client or OcrClient()
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp.write(data)
                 tmp_path = tmp.name
-            return run_graph_pipeline(tmp_path, document_id=document_id, form_type=form_type)
+            # `filename` is the upload's own name; tmp_path is where it was
+            # staged. Without this the gold-shaped output recorded
+            # original_filename as "tmpn0yclbyd.pdf".
+            return run_graph_pipeline(
+                tmp_path, document_id=document_id, form_type=form_type,
+                display_name=filename,
+            )
         except Exception as exc:  # noqa: BLE001 — a graph failure must not take
             # uploads down; fall through to the legacy path with the reason recorded.
             log.warning("graph pipeline failed, falling back to the legacy path: %s", exc)
@@ -298,7 +498,24 @@ def resolve_to_head(text: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="report only, do not write")
+    ap.add_argument("--snapshot", action="store_true",
+                    help="record the CURRENT content of the snapshot-tracked files as the "
+                         "intended version. Run this after deliberately changing one of them.")
     a = ap.parse_args()
+
+    if a.snapshot:
+        os.makedirs(SNAPSHOTS, exist_ok=True)
+        for snap in SNAPSHOTS_TRACKED:
+            if not os.path.exists(snap.path):
+                print(f"  !! missing file: {snap.path}")
+                continue
+            text = io.open(snap.path, encoding="utf-8").read()
+            if not snap.present(text):
+                print(f"  !! {snap.name}: marker absent, refusing to snapshot a reverted file")
+                continue
+            io.open(snap.store, "w", encoding="utf-8", newline="\n").write(text)
+            print("  recorded", snap.name)
+        return 0
 
     missing: list[str] = []
     applied: list[str] = []
@@ -352,7 +569,7 @@ def main() -> int:
         if edit.anchor not in text:
             print(f"  !! {edit.name}: anchor not found, skipped")
             continue
-        by_path[edit.path] = text.replace(edit.anchor, edit.replacement, 1)
+        by_path[edit.path] = text.replace(edit.anchor, edit.replacement, edit.count)
         applied.append(edit.name)
 
     if not a.check:
@@ -360,6 +577,23 @@ def main() -> int:
             if path.endswith(".py"):
                 ast.parse(text)
             io.open(path, "w", encoding="utf-8").write(text)
+
+    # --- whole-file snapshots ------------------------------------------------
+    for snap in SNAPSHOTS_TRACKED:
+        if not os.path.exists(snap.path):
+            print(f"  !! missing file: {snap.path}")
+            continue
+        if snap.present(io.open(snap.path, encoding="utf-8").read()):
+            continue
+        missing.append(snap.name)
+        if a.check:
+            continue
+        if not os.path.exists(snap.store):
+            print(f"  !! {snap.name}: no snapshot recorded, cannot restore")
+            continue
+        io.open(snap.path, "w", encoding="utf-8", newline="\n").write(
+            io.open(snap.store, encoding="utf-8").read())
+        applied.append(f"{snap.name} (restored from snapshot)")
 
     # --- requirements -------------------------------------------------------
     req = os.path.join(ROOT, "requirements.txt")

@@ -1,0 +1,90 @@
+document,kind,key,gold,predicted,verdict,category,reason,in_gold_covered
+001_Lab-report,field,document_title,DIAGNOSTIC REPORT,,MISS,not_extracted,The value is in the golden record but the system returned nothing for it.,True
+001_Lab-report,field,drawn,25/08/2021 10:04,25/08/2021 10:04,HIT,correct,,True
+001_Lab-report,field,date_of_receipt,25/08/2021 10:07,25/08/2021 10:07,HIT,correct,,True
+001_Lab-report,field,report_issue_date,25/08/2021 15:28,25/08/2021 15:28,HIT,correct,,True
+001_Lab-report,field,test_report_status,Final,,MISS,not_extracted,The value is in the golden record but the system returned nothing for it.,True
+001_Lab-report,test,tests.GLYCOSYLATED HEMOGLOBIN (HBA1C).result,5.0,,MISS,test_not_extracted,The whole results row is in the golden record but was not returned.,True
+001_Lab-report,test,tests.GLYCOSYLATED HEMOGLOBIN (HBA1C).unit,%,,MISS,test_not_extracted,The whole results row is in the golden record but was not returned.,True
+001_Lab-report,test,"tests.BILIRUBIN, TOTAL.result",0.70,0.70,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, TOTAL.unit",mg/dL,mg/dL,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, TOTAL.reference_range",< 1.1,<1.1,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, DIRECT.result",0.35 High,0.35,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, DIRECT.unit",mg/dL,mg/dL,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, DIRECT.reference_range",< or = 0.30,<or=0.30,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, INDIRECT.result",0.35,0.35,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, INDIRECT.unit",mg/dL,mg/dL,HIT,correct,,True
+001_Lab-report,test,"tests.BILIRUBIN, INDIRECT.reference_range",0.00 - 0.60,0.00-0.60,HIT,correct,,True
+001_Lab-report,test,tests.TOTAL PROTEIN.result,7.5,7.5,HIT,correct,,True
+001_Lab-report,test,tests.TOTAL PROTEIN.unit,g/dL,7P/6,MISS,test_wrong_unit,"Row matched, but its unit differs.",True
+001_Lab-report,test,tests.TOTAL PROTEIN.reference_range,6.0 - 8.0,6.0-8.0,HIT,correct,,True
+001_Lab-report,test,tests.ALBUMIN.result,4.8,4.8,HIT,correct,,True
+001_Lab-report,test,tests.ALBUMIN.unit,g/dL,7P/6,MISS,test_wrong_unit,"Row matched, but its unit differs.",True
+001_Lab-report,test,tests.ALBUMIN.reference_range,3.5 - 5.2,3.5-5.2,HIT,correct,,True
+001_Lab-report,test,tests.GLOBULIN.result,2.7,2.7,HIT,correct,,True
+001_Lab-report,test,tests.GLOBULIN.unit,g/dL,7P/6,MISS,test_wrong_unit,"Row matched, but its unit differs.",True
+001_Lab-report,test,tests.GLOBULIN.reference_range,2.0 - 3.5,2.0-3.5,HIT,correct,,True
+001_Lab-report,test,tests.ALBUMIN/GLOBULIN RATIO.result,1.8,1.8,HIT,correct,,True
+001_Lab-report,test,tests.ALBUMIN/GLOBULIN RATIO.unit,RATIO,RATIO,HIT,correct,,True
+001_Lab-report,test,tests.ALBUMIN/GLOBULIN RATIO.reference_range,1.00 - 2.00,1.00-2.00,HIT,correct,,True
+001_Lab-report,test,tests.ASPARTATE AMINOTRANSFERASE (AST/SGOT).result,20,20,HIT,correct,,True
+001_Lab-report,test,tests.ASPARTATE AMINOTRANSFERASE (AST/SGOT).unit,U/L,U/L,HIT,correct,,True
+001_Lab-report,test,tests.ASPARTATE AMINOTRANSFERASE (AST/SGOT).reference_range,< 40,<40,HIT,correct,,True
+001_Lab-report,test,tests.ALANINE AMINOTRANSFERASE (ALT/SGPT).result,14,14,HIT,correct,,True
+001_Lab-report,test,tests.ALANINE AMINOTRANSFERASE (ALT/SGPT).unit,U/L,U/L,HIT,correct,,True
+001_Lab-report,test,tests.ALANINE AMINOTRANSFERASE (ALT/SGPT).reference_range,< 41,<41,HIT,correct,,True
+001_Lab-report,test,tests.ALKALINE PHOSPHATASE.result,61,61,HIT,correct,,True
+001_Lab-report,test,tests.ALKALINE PHOSPHATASE.unit,U/L,U/L,HIT,correct,,True
+001_Lab-report,test,tests.ALKALINE PHOSPHATASE.reference_range,40 - 129,40-129,HIT,correct,,True
+001_Lab-report,test,tests.GAMMA GLUTAMYL TRANSFERASE (GGT).result,39,39,HIT,correct,,True
+001_Lab-report,test,tests.GAMMA GLUTAMYL TRANSFERASE (GGT).unit,U/L,U/L,HIT,correct,,True
+001_Lab-report,test,tests.GAMMA GLUTAMYL TRANSFERASE (GGT).reference_range,8 - 61,8-61,HIT,correct,,True
+001_Lab-report,test,tests.LACTATE DEHYDROGENASE.result,239 High,239,HIT,correct,,True
+001_Lab-report,test,tests.LACTATE DEHYDROGENASE.unit,U/L,U/L,HIT,correct,,True
+001_Lab-report,test,tests.LACTATE DEHYDROGENASE.reference_range,135 - 225,135-225,HIT,correct,,True
+001_Lab-report,test,tests.GLYCUSYLAIEU HEMUGLOBIN(HBAIC),,7.52,MISS,test_extra_row,The system returned a results row with no counterpart in the golden record — usually a duplicate under a variant name. Excluded from gold-covered metrics.,False
+002_Lab-report,field,specimen_date,21/Apr/2021 01:09PM,21/Apr/2021 01:09 PM,HIT,correct,,True
+002_Lab-report,field,sample_description,EDTA Blood.,EDTA Blood.,HIT,correct,,True
+002_Lab-report,field,section,HAEMATOLOGY,,MISS,not_extracted,The value is in the golden record but the system returned nothing for it.,True
+002_Lab-report,test,tests.Haemoglobin.result,12.4,12.4,HIT,correct,,True
+002_Lab-report,test,tests.Haemoglobin.unit,gm/dl,gm/dl,HIT,correct,,True
+002_Lab-report,test,tests.Haemoglobin.reference_range,12.5-16.0,12.5-16.0,HIT,correct,,True
+002_Lab-report,test,tests.Total Leucocyte Count.result,"3,700","3,700",HIT,correct,,True
+002_Lab-report,test,tests.Total Leucocyte Count.unit,/cumm,/cumm,HIT,correct,,True
+002_Lab-report,test,tests.Total Leucocyte Count.reference_range,4000-11000,4000-11000,HIT,correct,,True
+002_Lab-report,test,tests.Neutrophil.result,78,78,HIT,correct,,True
+002_Lab-report,test,tests.Neutrophil.unit,%,%,HIT,correct,,True
+002_Lab-report,test,tests.Neutrophil.reference_range,40-75,40-75,HIT,correct,,True
+002_Lab-report,test,tests.Lymphocytes.result,19,19,HIT,correct,,True
+002_Lab-report,test,tests.Lymphocytes.unit,%,%,HIT,correct,,True
+002_Lab-report,test,tests.Lymphocytes.reference_range,20-40,20-40,HIT,correct,,True
+002_Lab-report,test,tests.Eosinophils.result,0,0,HIT,correct,,True
+002_Lab-report,test,tests.Eosinophils.unit,%,%,HIT,correct,,True
+002_Lab-report,test,tests.Eosinophils.reference_range,1-6,1-6,HIT,correct,,True
+002_Lab-report,test,tests.Monocytes.result,3,3,HIT,correct,,True
+002_Lab-report,test,tests.Monocytes.unit,%,%,HIT,correct,,True
+002_Lab-report,test,tests.Monocytes.reference_range,2-10,2-10,HIT,correct,,True
+002_Lab-report,test,tests.PCV/HCT.result,37.3,37.3,HIT,correct,,True
+002_Lab-report,test,tests.PCV/HCT.unit,%,%,HIT,correct,,True
+002_Lab-report,test,tests.PCV/HCT.reference_range,35-50,35-50,HIT,correct,,True
+002_Lab-report,test,tests.RBC Count.result,4.50,4.50,HIT,correct,,True
+002_Lab-report,test,tests.RBC Count.unit,Million/cmm.,Million/cmm.,HIT,correct,,True
+002_Lab-report,test,tests.RBC Count.reference_range,3.50 -5.50,3.50-5.50,HIT,correct,,True
+002_Lab-report,test,tests.Platelet Count.result,1.26,1.26,HIT,correct,,True
+002_Lab-report,test,tests.Platelet Count.unit,Lakhs/cmm.,Lakhs/cmm.,HIT,correct,,True
+002_Lab-report,test,tests.Platelet Count.reference_range,1.5-4.5,1.5-4.5,HIT,correct,,True
+002_Lab-report,test,tests.MCV( Mean Corpuscular Volume).result,83.6,83.6,HIT,correct,,True
+002_Lab-report,test,tests.MCV( Mean Corpuscular Volume).unit,fl,fl,HIT,correct,,True
+002_Lab-report,test,tests.MCV( Mean Corpuscular Volume).reference_range,80-99,80-99,HIT,correct,,True
+002_Lab-report,test,tests.MCH (Mean Corpuscular Hb ).result,27.8,27.8,HIT,correct,,True
+002_Lab-report,test,tests.MCH (Mean Corpuscular Hb ).unit,Picogram,Picogram,HIT,correct,,True
+002_Lab-report,test,tests.MCH (Mean Corpuscular Hb ).reference_range,27.0-31.0,27.0-31.0,HIT,correct,,True
+002_Lab-report,test,tests.MCHC( Mean Corpuscular Hb Concentration).result,33.2,33.2,HIT,correct,,True
+002_Lab-report,test,tests.MCHC( Mean Corpuscular Hb Concentration).unit,gm/dl,,MISS,test_wrong_unit,"Row matched, but its unit differs.",True
+002_Lab-report,test,tests.MCHC( Mean Corpuscular Hb Concentration).reference_range,33.0-37.0,33.0-37.0,HIT,correct,,True
+002_Lab-report,test,tests.RDW-cv.result,15.1,15.1,HIT,correct,,True
+002_Lab-report,test,tests.RDW-cv.unit,%,%,HIT,correct,,True
+002_Lab-report,test,tests.RDW-cv.reference_range,11.5-14.5,11.5-14.5,HIT,correct,,True
+002_Lab-report,test,tests.RDW-sd.result,45.5,45.5,HIT,correct,,True
+002_Lab-report,test,tests.RDW-sd.unit,fl,fl,HIT,correct,,True
+002_Lab-report,test,tests.RDW-sd.reference_range,37.0-46.0,37.0-46.0,HIT,correct,,True

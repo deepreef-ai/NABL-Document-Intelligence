@@ -92,6 +92,11 @@ class LlmChain:
     def __init__(self, providers: list[LlmProvider]):
         self.providers = providers
         self._status: dict[str, _ProviderStatus] = {p.name: _ProviderStatus() for p in providers}
+        # Which provider served the most recent successful call, and what it
+        # reported spending. Read by app/graph/llm.py to attribute cost per
+        # node; None until the first success.
+        self.last_usage: dict | None = None
+        self.last_provider: str | None = None
 
     def _record_failure(self, provider: LlmProvider, exc: Exception, now: float) -> None:
         status = self._status[provider.name]
@@ -166,7 +171,12 @@ class LlmChain:
         usable, errors = self._usable_providers()
         for provider in usable:
             try:
-                raw = provider.generate(system, user_text, image, image_media_type, want_json=True, images=images)
+                # `images` is passed only when there are any: not every provider
+                # accepts the parameter (Nova does, Gemini and Groq do not), and
+                # sending images=None to one that lacks it raises TypeError and
+                # takes the chain down for a text-only call it could have served.
+                extra = {"images": images} if images else {}
+                raw = provider.generate(system, user_text, image, image_media_type, want_json=True, **extra)
                 result = parse_json_object(raw)
             except Exception as exc:  # noqa: BLE001
                 self._record_failure(provider, exc, time.monotonic())

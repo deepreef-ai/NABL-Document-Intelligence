@@ -16,6 +16,7 @@ file born-digital and silently mis-reads a third of it.
 """
 from __future__ import annotations
 
+import io
 import logging
 
 from app.graph.config import get_graph_settings
@@ -36,6 +37,11 @@ _MIN_CHARS = 20
 # A page whose text is mostly punctuation and stray marks is OCR noise, not
 # text, however many characters it has.
 _MIN_ALNUM_RATIO = 0.35
+
+# Mid-grey. Chart bands and table shading fall to white, printed text to
+# black; a scan faint enough to lose text at this level loses it to the
+# detector anyway, and the un-thresholded pass is still read alongside.
+_BINARY_THRESHOLD = 128
 
 
 def _quality_ok(text: str, min_chars: int) -> bool:
@@ -175,6 +181,67 @@ def _merge_ocr_lines(native: str, ocr_text: str) -> str:
     return native + "\n[image region]\n" + "\n".join(additions)
 
 
+def _binarised(image_bytes: bytes) -> bytes | None:
+    """Black text on white, with the colour thrown away.
+
+    A trend chart's points sit on coloured bands, and colour is noise to a text
+    detector: MEASURED on `001_Lab-report.png`, reading the page as-is finds
+    three of the five plotted values and reading a threshold of it finds all
+    five, plus the top axis tick and the two dates OCR otherwise fuses.
+    """
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            grey = ImageOps.autocontrast(im.convert("L"))
+            bw = grey.point(lambda v: 0 if v < _BINARY_THRESHOLD else 255, mode="L").convert("RGB")
+            out = io.BytesIO()
+            bw.save(out, format="PNG")
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 — a second rendering is a bonus, never required
+        return None
+
+
+def _with_chart(text: str, ocr_result, image_bytes: bytes | None = None) -> str:
+    """Append a chart's recovered structure to a page's OCR text.
+
+    OCR flattens a plot into loose tokens, and the extractor then reads the
+    chart's TITLE next to the first number it finds. MEASURED on a scanned
+    HbA1c trend chart: it emitted "GLYCOSYLATED HEMOGLOBIN (HBA1C) = 7.52 %",
+    where 7.52 is the second tick on the y-axis and the patient's readings are
+    5.6, 5.4, 5.5, 4.8 and 5.0.
+
+    The page is read a SECOND time in black and white when a chart is present,
+    because the coloured bands behind the points defeat the text detector. The
+    extra pass costs one OCR call and only happens on pages that have a chart.
+
+    Never fatal: a chart is a bonus on top of the text, so a failure here
+    leaves the page exactly as OCR read it.
+    """
+    try:
+        from app.documents import local_ocr
+        from app.graph.charts import annotate, best_chart, detect_chart
+
+        lines = getattr(ocr_result, "lines", None) or []
+        boxes = getattr(ocr_result, "boxes", None) or []
+        if not lines or len(boxes) != len(lines):
+            return text
+
+        if not detect_chart(lines, boxes).is_chart():
+            return text        # no chart, so no second pass to pay for
+
+        renderings = [(lines, boxes)]
+        bw = _binarised(image_bytes) if image_bytes else None
+        if bw:
+            second = local_ocr.extract_english(bw)
+            renderings.append((second.lines or [], second.boxes or []))
+
+        return annotate(text, best_chart(*renderings))
+    except Exception:  # noqa: BLE001 — chart detection must never lose a page
+        log.debug("chart detection failed", exc_info=True)
+        return text
+
+
 def _ocr_page(pdf_bytes: bytes, page_number: int, dpi: int) -> tuple[str, float | None, str]:
     """Returns (text, confidence, error). Never raises."""
     try:
@@ -194,7 +261,7 @@ def _ocr_page(pdf_bytes: bytes, page_number: int, dpi: int) -> tuple[str, float 
         # appended, duplicating the results table the text layer already had.
         lines = [clean_text(ln) for ln in (getattr(result, "lines", None) or [])]
         text = "\n".join(ln for ln in lines if ln) or clean_text(getattr(result, "text", "") or "")
-        return text, getattr(result, "confidence", None), ""
+        return _with_chart(text, result, image), getattr(result, "confidence", None), ""
     except Exception as exc:  # noqa: BLE001 — OCR failure is a recorded page state
         return "", None, str(exc)[:300]
 
@@ -362,7 +429,7 @@ def preprocess_document(state: GraphState) -> dict:
                 from app.documents import local_ocr
 
                 result = local_ocr.extract_english(data)
-                ocr_text = clean_text(getattr(result, "text", "") or "")
+                ocr_text = _with_chart(clean_text(getattr(result, "text", "") or ""), result, data)
                 ocr_conf = getattr(result, "confidence", None)
             except Exception as exc:  # noqa: BLE001
                 ocr_error = str(exc)[:300]

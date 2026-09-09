@@ -1,5 +1,6 @@
 import logging
 import mimetypes
+import os
 
 from app.documents import classifier, extractor, local_ocr, pdf_utils, unified_extraction
 from app.documents import call_budget as cb
@@ -10,6 +11,7 @@ from app.documents.geometry import Rect
 from app.documents.grounding import FieldResult, PipelineResult, ground
 from app.documents.ocr_client import OcrClient, OcrResult, SUPPORTED_SCRIPTS
 from app.config import get_settings
+from app.graph.config import get_graph_settings
 from app.llm.factory import get_llm_chain
 
 log = logging.getLogger(__name__)
@@ -141,6 +143,43 @@ def process_document(
     # a thread pool, so shared mutable state would attribute one document's
     # calls to another.
     budget = cb.CallBudget.from_settings(document_id)
+
+    # The agentic LangGraph workflow (app/graph/) is the extraction path.
+    # graph_pipeline_enabled is a rollback lever only: set it false to restore
+    # the legacy paths below without a deploy.
+    if get_graph_settings().graph_pipeline_enabled:
+        import tempfile
+
+        from app.graph.adapter import run_graph_pipeline
+
+        suffix = (
+            ".pdf" if kind == "pdf"
+            else ".docx" if kind == "docx"
+            else _image_suffix(content_type)
+        )
+        tmp_path = None
+        try:
+            # The graph validates and reads a real file — encryption, page
+            # count, readability — so the upload bytes are staged to disk.
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+            # `filename` is the upload's own name; tmp_path is where it was
+            # staged. Without this the gold-shaped output recorded
+            # original_filename as "tmpn0yclbyd.pdf".
+            return run_graph_pipeline(
+                tmp_path, document_id=document_id, form_type=form_type,
+                display_name=filename,
+            )
+        except Exception as exc:  # noqa: BLE001 — a graph failure must not take
+            # uploads down; fall through to the legacy path with the reason recorded.
+            log.warning("graph pipeline failed, falling back to the legacy path: %s", exc)
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     if kind == "pdf":
         result = _process_pdf(data, script, ocr_client, form_type, document_id, filename, budget)

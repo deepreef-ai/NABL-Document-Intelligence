@@ -1,5 +1,7 @@
+import os
+
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -60,6 +62,11 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
     # extraction_warnings. The document is still "extracted" with whatever
     # DID come back, but the gap is recorded rather than silently hidden.
     document.error = "; ".join(result.extraction_warnings) or None
+    # The gold-shaped record and its results table, stored as the pipeline
+    # produced them. getattr keeps the legacy extraction paths working: they
+    # build a PipelineResult without either.
+    document.structured_json = getattr(result, "structured", None) or None
+    document.tests_json = getattr(result, "tests", None) or None
 
     db.query(ExtractedField).filter(ExtractedField.document_id == document.id).delete()
     for f in result.fields:
@@ -72,6 +79,8 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
                 source_page=f.source_page,
                 source_bbox=f.source_bbox.model_dump() if f.source_bbox else None,
                 source=f.source,
+                section=getattr(f, "section", "") or None,
+                field_group=getattr(f, "group", "") or None,
             )
         )
     db.add(document)
@@ -124,6 +133,36 @@ def list_documents(application_id: str, db: Session = Depends(get_db)):
     return [_serialize(d) for d in docs]
 
 
+@router.get("/documents/{document_id}/structured")
+def structured_document(document_id: str, db: Session = Depends(get_db)):
+    """The extraction in the labelled dataset's own shape.
+
+    Same keys, same nesting, same tests[] columns as the hand-authored records
+    in labelled_dataset/, so a result can be diffed against ground truth
+    without a translation layer — and so what a reviewer downloads is the
+    format the rest of the pipeline already speaks.
+
+    Returned as stored rather than rebuilt from extracted_fields: those rows
+    have been through review edits, and "the extraction" should be one
+    coherent record rather than a reconstruction that drifts from what the
+    graph actually decided.
+    """
+    document = _get_document(db, document_id)
+    if not document.structured_json:
+        raise HTTPException(
+            404,
+            f"no structured output for {document.filename!r} — it was extracted "
+            "before this format existed, or by the legacy pipeline. Re-extract to build it.",
+        )
+    return JSONResponse(
+        content=document.structured_json,
+        headers={
+            "Content-Disposition":
+                f'inline; filename="{os.path.splitext(document.filename)[0]}.json"',
+        },
+    )
+
+
 @router.get("/documents/{document_id}/render")
 def render_document(document_id: str, page: int = 0, db: Session = Depends(get_db)):
     document = _get_document(db, document_id)
@@ -156,6 +195,9 @@ def _serialize(document: Document) -> dict:
         "page_count": document.page_count,
         "status": document.status,
         "error": document.error,
+        # A results table is not a list of fields, so it travels as rows with
+        # its columns intact rather than being flattened into scalars.
+        "tests": document.tests_json or [],
         "fields": [
             {
                 "id": f.id,
@@ -165,6 +207,8 @@ def _serialize(document: Document) -> dict:
                 "source_page": f.source_page,
                 "source_bbox": f.source_bbox,
                 "source": f.source,
+                "section": f.section,
+                "group": f.field_group,
                 "accepted": f.accepted,
             }
             for f in document.fields
