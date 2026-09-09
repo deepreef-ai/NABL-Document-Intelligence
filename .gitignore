@@ -16,3 +16,5 @@ frontend/dist/
 .DS_Store
 backend/graph_storage/checkpoints.db
 backend/graph_storage/checkpoints.db.backup
+backend/.env*
+!.env.example
