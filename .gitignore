@@ -14,3 +14,5 @@ frontend/dist/
 
 # editors / os
 .DS_Store
+backend/graph_storage/checkpoints.db
+backend/graph_storage/checkpoints.db.backup
