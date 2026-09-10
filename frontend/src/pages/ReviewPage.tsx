@@ -146,16 +146,10 @@ export default function ReviewPage() {
                   <button onClick={() => handleReextract(selectedDocument.id)}>Re-extract</button>
                 </div>
 
-                {selectedDocument.error && (
-                  <div className="extraction-warnings">
-                    <strong>Extraction notes</strong>
-                    <ul>
-                      {selectedDocument.error.split("; ").map((note, i) => (
-                        <li key={i}>{note}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                {/* Extraction notes are intentionally not rendered. They are
+                    still returned by the API and visible via "View JSON"
+                    above; per-field notes stay on the field they describe
+                    (see ExtractionGroups). */}
 
                 {/* Above the fields: on a lab report the results ARE the
                     document, and burying them under twenty header fields makes

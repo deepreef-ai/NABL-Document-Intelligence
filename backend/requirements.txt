@@ -1,8 +1,19 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 sqlalchemy==2.0.35
-pydantic==2.9.2
-pydantic-settings==2.5.2
+# Docling 2.126.0 does not work below 2.13:
+#   - on 2.9.2 it cannot import at all (AttributeError: force_full_page_ocr —
+#     OcrAutoOptions inherits a computed_field property that has a setter,
+#     which pydantic 2.9 cannot bind)
+#   - below 2.12 its own default PdfPipelineOptions() fails to serialise while
+#     Docling builds a pipeline cache key:
+#     PydanticSerializationError: Circular reference detected
+# MEASURED: the full suite is byte-identical on 2.13.5 and 2.9.2 — 453 passed,
+# the same 13 pre-existing test_pipeline.py failures — so this is a free move.
+pydantic==2.13.5
+# docling-core requires >=2.14.0. Was 2.5.2; the Docling install raised it and
+# left the pin stale, so it is declared here rather than left as drift.
+pydantic-settings==2.15.0
 python-multipart==0.0.9
 PyMuPDF==1.24.10
 python-docx==1.1.2
@@ -47,3 +58,24 @@ langgraph==1.2.11
 # app/graph/graph.py's build_checkpointer() is the only place that changes.
 langgraph-checkpoint-sqlite==3.1.1
 langchain-core==1.6.2
+
+# --- OPTIONAL: document structure via Docling (app/graph/docling_adapter.py) -
+# NOT installed by default and NOT required to run the application. Docling
+# pulls 45 packages including torch and torchvision (~2.5 GB), which is a steep
+# price for a feature that is off unless USE_DOCLING=true.
+#
+# It supplies layout, reading order, heading levels and table row/cell
+# structure. It does NOT do OCR here — the adapter sets do_ocr=False and
+# RapidOCR remains the only OCR engine (see the adapter's module docstring).
+#
+# Resolved clean against this project's pydantic 2.13.5 / numpy 2.3.5 /
+# pillow 12.3.0 as of 2026-09-09; no pins were changed to accommodate it.
+#
+#   pip install docling==2.126.0
+#
+# With it absent, docling_available() returns False and every document takes
+# the RapidOCR + PyMuPDF path exactly as before.
+#
+# VERIFIED 2026-09-10 against a real 2-page table PDF: 10 blocks, 4 tables,
+# 25 rows, 117 cells, headings and bounding boxes intact, do_ocr=False.
+docling==2.126.0

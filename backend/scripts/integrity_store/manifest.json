@@ -177,12 +177,16 @@
       "size": 18306
     },
     "backend/app/graph/config.py": {
-      "sha256": "f8e93ac245d226ad2c83d499b687efdd1d376ec8adc58c3d58f815faaaf48806",
-      "size": 6558
+      "sha256": "110673ab933cfd98e9f062145858303c1d73cf40ab16073cb2912857a60dabd2",
+      "size": 7334
     },
     "backend/app/graph/database.py": {
       "sha256": "34fc22a14f3b79ad3e62e8a0928717087c6c9f3b633e6fdfad99469c0b8cb88f",
       "size": 16302
+    },
+    "backend/app/graph/docling_adapter.py": {
+      "sha256": "2326c3a86d122178585c45137fe5951f518b99fb8d5d7fbc7488f3cca43595ee",
+      "size": 20117
     },
     "backend/app/graph/errors.py": {
       "sha256": "c2c1f82d25540ec54bd2f6a7bc8f354c3f0e209d1e4408a87ac65546f82e5d95",
@@ -249,8 +253,8 @@
       "size": 2656
     },
     "backend/app/graph/nodes/preprocess.py": {
-      "sha256": "8d8c761add267ef742fa633ceff6028293b566331e2460d0ab8944d4836800b0",
-      "size": 21902
+      "sha256": "a7ada34149755ad9a3e099cad70c8c1fa5377b2187f18a4464e7e8d20b42bb75",
+      "size": 24576
     },
     "backend/app/graph/nodes/quality.py": {
       "sha256": "48daeece6cca2a8df2e3220dac22388d7231de7d56d2ee0ea3db0ecd4128a622",
@@ -277,8 +281,8 @@
       "size": 6717
     },
     "backend/app/graph/schemas.py": {
-      "sha256": "bab8fd203f1c2ba4ed2e8df6cdef00b6daefe4d986b9e7c1419f2c2eeb9fdcc2",
-      "size": 18779
+      "sha256": "e5887bac2191adf54a873f232ab9986bf6611c07cd78f09fafe02717347b292a",
+      "size": 18632
     },
     "backend/app/graph/state.py": {
       "sha256": "9a88de7c1239e04031641ffc7a12303b5b57891d64fb9e397885736c026e410e",
@@ -475,6 +479,10 @@
     "backend/tests/graph/test_charts.py": {
       "sha256": "8206a26956b39d008e791cf5f48574422efdca8c5c870e8cc293f628e2dff417",
       "size": 11411
+    },
+    "backend/tests/graph/test_docling_adapter.py": {
+      "sha256": "834630ce822e91aa52b81ec8ed3a53e4bafcdc34701552f6878a829a8f1fc3b0",
+      "size": 16996
     },
     "backend/tests/graph/test_evidence_columns.py": {
       "sha256": "52dd536fe06914ce017d9fe413fc6baa3ccaa37f86a637b367466de241dc2e73",

@@ -65,6 +65,12 @@ class GraphState(BaseModel):
     document_id: str
     file_path: str = ""
     file_name: str = ""
+    #: Script of any scanned page, as chosen on upload ("english",
+    #: "devanagari", "arabic", "ta", "te", "ka"). It decides WHICH OCR engine
+    #: reads a scanned page: deepreef-ocr covers the Indic and Arabic scripts,
+    #: RapidOCR covers Latin, and they are different models rather than a
+    #: primary and a spare. Without it the graph could only ever call RapidOCR.
+    script: str = "english"
     #: What the document is CALLED, as opposed to where it currently sits.
     #: Uploads are staged to a NamedTemporaryFile before the graph reads them,
     #: so file_name is "tmpn0yclbyd.pdf" and the gold-shaped output recorded

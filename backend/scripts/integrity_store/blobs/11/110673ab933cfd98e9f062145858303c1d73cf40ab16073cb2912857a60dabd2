@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-from pydantic import AliasChoices, Field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,17 +92,7 @@ class GraphSettings(BaseSettings):
     use_docling: bool = False
     #: A structure pass runs models over every page and can hang. The pipeline
     #: gives up at this point and keeps the RapidOCR + PyMuPDF result.
-    #:
-    #: Two env names on purpose. The field is `docling_timeout_seconds`, so
-    #: pydantic-settings would accept only DOCLING_TIMEOUT_SECONDS — and
-    #: DOCLING_TIMEOUT, the name the deployment docs and operators use, was
-    #: silently ignored: MEASURED, setting it left the timeout at 120. A knob
-    #: that looks set and does nothing is worse than one that does not exist.
-    docling_timeout_seconds: float = Field(
-        default=120.0,
-        validation_alias=AliasChoices("DOCLING_TIMEOUT", "DOCLING_TIMEOUT_SECONDS",
-                                      "docling_timeout_seconds"),
-    )
+    docling_timeout_seconds: float = 120.0
     #: Skip the structure pass on documents longer than this, where the cost
     #: is worst and the timeout most likely. 0 disables the limit.
     docling_max_pages: int = 50

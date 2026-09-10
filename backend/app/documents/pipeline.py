@@ -169,7 +169,7 @@ def process_document(
             # original_filename as "tmpn0yclbyd.pdf".
             return run_graph_pipeline(
                 tmp_path, document_id=document_id, form_type=form_type,
-                display_name=filename,
+                display_name=filename, script=script,
             )
         except Exception as exc:  # noqa: BLE001 — a graph failure must not take
             # uploads down; fall through to the legacy path with the reason recorded.

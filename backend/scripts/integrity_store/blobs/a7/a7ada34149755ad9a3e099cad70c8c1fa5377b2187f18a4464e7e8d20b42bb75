@@ -267,48 +267,6 @@ def _ocr_page(pdf_bytes: bytes, page_number: int, dpi: int) -> tuple[str, float 
         return "", None, str(exc)[:300]
 
 
-def _ocr_scanned_page(
-    pdf_bytes: bytes, page_number: int, dpi: int, script: str
-) -> tuple[str, float | None, str, str]:
-    """Read a scanned page with the engine that has a model for its script.
-
-    Returns (text, confidence, error, engine).
-
-    deepreef-ocr ("Aakash") and RapidOCR are NOT a primary and a spare — they
-    are different models covering different alphabets. deepreef-ocr has
-    Devanagari, Arabic, Tamil, Telugu and Kannada; RapidOCR has Latin, and
-    raises for anything else. So the script chooses the engine, exactly as
-    documents/pipeline.py has always done.
-
-    RapidOCR is still tried when deepreef-ocr fails, because a Lambda can be
-    unreachable, unauthorised or timing out for reasons that have nothing to
-    do with the page — and a Latin-alphabet reading of a Devanagari page is
-    poor, but it beats an unreadable page.
-    """
-    from app.documents.ocr_client import SUPPORTED_SCRIPTS
-
-    if script in SUPPORTED_SCRIPTS:
-        try:
-            from app.documents import pdf_utils
-            from app.documents.ocr_client import OcrClient
-
-            image = pdf_utils.rasterize_page(pdf_bytes, page_number - 1, dpi=dpi)
-            result = OcrClient().extract(image, script)
-            text = clean_text(getattr(result, "text", "") or "")
-            if text:
-                return text, getattr(result, "confidence", None), "", f"deepreef:{script}"
-            note = "deepreef-ocr returned no text"
-        except Exception as exc:  # noqa: BLE001 — a remote OCR failure is a fallback
-            note = f"deepreef-ocr failed: {str(exc)[:200]}"
-        log.info("ocr: deepreef fell back to rapidocr page=%d script=%s reason=%s",
-                 page_number, script, note)
-        text, conf, error = _ocr_page(pdf_bytes, page_number, dpi)
-        return text, conf, (error or note if not text else ""), "rapidocr(fallback)"
-
-    text, conf, error = _ocr_page(pdf_bytes, page_number, dpi)
-    return text, conf, error, "rapidocr"
-
-
 def _detect_table(page) -> bool:
     """PyMuPDF's own table finder where available, ruled-line heuristic where not."""
     try:
@@ -328,8 +286,7 @@ def _detect_table(page) -> bool:
         return False
 
 
-def _apply_docling(state, path, settings, page_text, page_meta, errors,
-                   *, digital_pages=None, scanned_pages=None) -> list:
+def _apply_docling(state, path, settings, page_text, page_meta, errors) -> list:
     """Enrich already-extracted pages with Docling's structure. Never raises.
 
     Additive by construction. `page_text` gains only table rows the text layer
@@ -344,24 +301,13 @@ def _apply_docling(state, path, settings, page_text, page_meta, errors,
     if not getattr(settings, "use_docling", False):
         return []
 
-    # Docling reads a page's LAYOUT, not its pixels: do_ocr is off, so on a
-    # scanned page it has no text to attach structure to and returns nothing
-    # after a minute of model time. MEASURED on a 2-page report: 78s for a
-    # structure pass. A document with no digital page is not worth that.
-    digital = list(digital_pages or [])
-    if digital_pages is not None and not digital:
-        reason = "every page is scanned; Docling has no text layer to read"
-        log.info("docling: skipped document=%s reason=%s", os.path.basename(path), reason)
-        return audit(NODE, "docling_skipped", reason)
-
     from app.graph.docling_adapter import (
         merge_ocr_and_docling_output,
         parse_document_with_docling,
     )
 
     name = os.path.basename(path)
-    log.info("docling: start document=%s pages=%d digital=%d scanned=%d",
-             name, len(page_meta), len(digital), len(scanned_pages or []))
+    log.info("docling: start document=%s pages=%d", name, len(page_meta))
 
     result = parse_document_with_docling(
         path,
@@ -382,10 +328,7 @@ def _apply_docling(state, path, settings, page_text, page_meta, errors,
         )
 
     merged_pages = 0
-    allowed = set(digital) if digital_pages is not None else set(page_meta)
     for page_no, record in page_meta.items():
-        if page_no not in allowed:
-            continue        # a scanned page's text is the OCR engine's, not Docling's
         layout = result.pages.get(page_no)
         if layout is None:
             continue
@@ -422,11 +365,6 @@ def preprocess_document(state: GraphState) -> dict:
     processed: list[int] = []
     unreadable: list[int] = []
     ocr_pages: list[int] = []
-    # PyMuPDF's verdict per page, and the fork the whole node turns on: a page
-    # with a usable text layer is DIGITAL and goes to Docling for structure; a
-    # page without one is SCANNED and goes to a script-routed OCR engine.
-    digital_pages: list[int] = []
-    scanned_pages: list[int] = []
     entries = []
     errors = []
 
@@ -467,10 +405,7 @@ def preprocess_document(state: GraphState) -> dict:
                     )
 
                 if _quality_ok(native, _MIN_CHARS):
-                    # DIGITAL page: it has its own text layer, so no OCR
-                    # engine reads it and Docling can recover its structure.
                     text, status = native, PageStatus.NATIVE_TEXT
-                    digital_pages.append(page_no)
                     # A good text layer can still be missing whole regions of
                     # the page: a letterhead, a stamp, a scanned annexure
                     # pasted in as a picture. Those carry the lab's name and
@@ -496,18 +431,10 @@ def preprocess_document(state: GraphState) -> dict:
                             entries += audit(NODE, "image_ocr_failed", img_error[:200],
                                              page_number=page_no, level="warning")
                 elif settings.ocr_enabled:
-                    # SCANNED page: no usable text layer, so an OCR engine
-                    # reads it and Docling is skipped for it entirely —
-                    # with do_ocr=False Docling has nothing to read here and
-                    # would spend a minute per document returning nothing.
-                    ocr_text, ocr_conf, ocr_error, engine = _ocr_scanned_page(
-                        data, page_no, settings.ocr_dpi, state.script or "english")
-                    scanned_pages.append(page_no)
+                    ocr_text, ocr_conf, ocr_error = _ocr_page(data, page_no, settings.ocr_dpi)
                     if ocr_text and _quality_ok(ocr_text, _MIN_CHARS):
                         text, status = ocr_text, PageStatus.OCR
                         ocr_pages.append(page_no)
-                        entries += audit(NODE, "page_ocr", f"read by {engine}",
-                                         page_number=page_no)
                         if ocr_conf is not None and ocr_conf < settings.ocr_low_confidence_threshold:
                             note = f"low OCR confidence {ocr_conf:.2f}"
                             entries += audit(NODE, "low_ocr_confidence", note, page_number=page_no,
@@ -545,10 +472,7 @@ def preprocess_document(state: GraphState) -> dict:
         # what Docling adds is the structure reading order destroyed — heading
         # levels, and which cells belong to which row. A failure here leaves
         # the pages exactly as they are.
-        entries += _apply_docling(
-            state, path, settings, page_text, page_meta, errors,
-            digital_pages=digital_pages, scanned_pages=scanned_pages,
-        )
+        entries += _apply_docling(state, path, settings, page_text, page_meta, errors)
 
     # --------------------------------------------------------------- DOCX
     elif state.file_type == "docx":

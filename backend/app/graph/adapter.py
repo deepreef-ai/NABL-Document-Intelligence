@@ -235,11 +235,12 @@ def run_graph_pipeline(
     document_id: str,
     form_type: str = "",
     display_name: str = "",
+    script: str = "english",
 ) -> PipelineResult:
     """Process one document through the graph and adapt the result."""
     result = run_document(
         file_path, document_id=document_id, form_id=form_type,
-        display_name=display_name,
+        display_name=display_name, script=script,
     )
 
     # A multi-page report restates its header on every page, and the same value

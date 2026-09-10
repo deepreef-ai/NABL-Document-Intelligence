@@ -794,27 +794,6 @@ button.accepted {
   opacity: 0.45;
 }
 
-.extraction-warnings {
-  margin: 12px 0 4px;
-  padding: 10px 14px;
-  border: 1px solid rgba(217, 119, 6, 0.35);
-  border-radius: 12px;
-  background: rgba(217, 119, 6, 0.08);
-  font-size: 13px;
-}
-
-.extraction-warnings strong {
-  display: block;
-  margin-bottom: 4px;
-  color: #b45309;
-}
-
-.extraction-warnings ul {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--text-muted);
-}
-
 /* ============================================================
    Review page — full-bleed app shell.
 
@@ -1117,12 +1096,3 @@ button.accepted {
   border-color: var(--accent);
 }
 
-/* An extraction note is not a failure. Most are advisories — "3 values could
-   not be quoted", "6 items need a person to decide" — and printing them in
-   red on a document that extracted fine makes a healthy upload look broken.
-   Muted here; the notes themselves live on the review screen beside the
-   values they concern. */
-.document-notes {
-  color: var(--text-muted);
-  font-size: 0.85em;
-}

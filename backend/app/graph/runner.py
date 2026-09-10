@@ -46,6 +46,7 @@ def _initial_state(
     form_id: str = "",
     target_form_schema: dict | None = None,
     display_name: str = "",
+    script: str = "english",
 ) -> GraphState:
     schema = None
     if target_form_schema:
@@ -58,6 +59,7 @@ def _initial_state(
         document_id=document_id,
         file_path=file_path,
         display_name=display_name,
+        script=script,
         target_form_schema=schema,
         started_at=time.monotonic(),
     )
@@ -77,6 +79,7 @@ def run_document(
     form_id: str = "",
     target_form_schema: dict | None = None,
     display_name: str = "",
+    script: str = "english",
     checkpointer=None,
 ) -> FinalResult:
     """Process one document start to finish."""
@@ -86,7 +89,7 @@ def run_document(
 
     state = _initial_state(
         document_id=document_id, file_path=file_path, display_name=display_name,
-        form_id=form_id, target_form_schema=target_form_schema,
+        form_id=form_id, target_form_schema=target_form_schema, script=script,
     )
 
     started = time.monotonic()

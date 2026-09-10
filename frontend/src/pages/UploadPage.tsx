@@ -44,11 +44,6 @@ const DEFAULT_FORM_TYPE: NablFormType = "NABL_151";
 //: application; "/applications/<id>/upload" carries its own id, so reloading
 //: that page still shows exactly the documents belonging to it.
 
-/** Notes are joined with "; " by the pipeline — see routers/documents.py. */
-function noteCount(notes: string): number {
-  return notes.split("; ").filter((n) => n.trim()).length;
-}
-
 export default function UploadPage() {
   const { applicationId } = useParams();
   const navigate = useNavigate();
@@ -163,21 +158,13 @@ export default function UploadPage() {
             <strong>{d.filename}</strong> — {d.status}
             {d.doc_type && <span> · {d.doc_type}</span>}
             {d.extraction_source && <span> · via {d.extraction_source}</span>}
-            {/* `error` carries every extraction note, most of which are
-                advisories rather than failures — "3 values could not be
-                quoted", "6 items need a person to decide". Printed in full
-                and in red on a document that extracted FINE, they read as a
-                broken upload, and a reviewer learns to distrust the colour.
-
-                A document that actually failed shows why, here, where the
-                upload is. A document that succeeded shows a muted count; the
-                notes themselves are on the review screen, next to the values
-                they are about. */}
-            {d.error && (
-              d.status === "failed"
-                ? <span className="error"> · {d.error}</span>
-                : <span className="document-notes"> · {noteCount(d.error)} note{noteCount(d.error) === 1 ? "" : "s"}</span>
-            )}
+            {/* Only a document that actually FAILED says anything here.
+                `error` also carries advisory extraction notes on documents
+                that extracted fine ("3 values could not be quoted", "6 items
+                need a person to decide"); those are deliberately not
+                surfaced in the UI — they remain in the API response and in
+                the review screen's "View JSON". */}
+            {d.error && d.status === "failed" && <span className="error"> · {d.error}</span>}
           </li>
         ))}
       </ul>
