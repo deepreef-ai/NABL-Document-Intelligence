@@ -97,6 +97,23 @@ class Settings(BaseSettings):
     # public Function URL). Needs AWS credentials in the environment (a
     # profile, role, or access keys) with lambda:InvokeFunction on this
     # function.
+    # Which engine reads ENGLISH/Latin pages:
+    #   dev   -> documents/local_ocr.py, RapidOCR in-process. No cloud call,
+    #            no rate limit, no AWS credentials needed.
+    #   prod  -> the deepreef-ocr Lambda below, same engine every other
+    #            script already uses.
+    # Non-Latin scripts ignore this and always use the Lambda: RapidOCR's
+    # bundled English model garbles Devanagari digits and table layout badly
+    # enough to misattribute whole rows, so dev must not route them locally.
+    app_env: str = "dev"
+
+    # The `script` value sent to the Lambda for English. The function picks its
+    # recognition model from this string; we have only ever invoked it with the
+    # non-Latin codes, so the Latin one is configurable rather than assumed.
+    # If prod English OCR returns "no recognition model for script", this is
+    # the setting to change.
+    ocr_lambda_english_script: str = "english"
+
     ocr_lambda_function_name: str = "akash-ocr"
     ocr_lambda_region: str = "ap-south-1"
     ocr_timeout_seconds: float = 30.0
@@ -196,6 +213,17 @@ class Settings(BaseSettings):
     # server happened to be started.
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+
+    @field_validator("app_env")
+    @classmethod
+    def _known_env(cls, value: str) -> str:
+        """Fail at startup, not at the first scanned page. A typo like
+        APP_ENV=production would otherwise read as "not prod" and quietly send
+        production traffic to the local engine."""
+        normalized = value.strip().lower()
+        if normalized not in {"dev", "prod"}:
+            raise ValueError(f"app_env must be 'dev' or 'prod', got {value!r}")
+        return normalized
 
     @field_validator("storage_dir", "qdrant_storage_dir")
     @classmethod

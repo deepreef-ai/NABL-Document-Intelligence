@@ -67,6 +67,38 @@ def test_unsupported_script_is_rejected_before_any_network_call(monkeypatch):
     client = _client_with(fake_lambda, monkeypatch)
 
     with pytest.raises(OcrError, match="no recognition model"):
+        client.extract(b"bytes", script="cyrillic")
+
+    assert fake_lambda.invoke_calls == []
+
+
+def test_the_configured_english_script_is_accepted(monkeypatch):
+    """English used to be rejected here outright. It is now routable, because
+    config.py's app_env=prod reads English through this Lambda too — but only
+    under the code ocr_lambda_english_script names, since the function selects
+    its recognition model from that string."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "ocr_lambda_english_script", "english")
+    fake_lambda = FakeLambdaClient(_lambda_envelope(
+        {"success": True, "ocr_data": FAKE_OCR_DATA, "image": {}, "latency_ms": 1.0}
+    ))
+    client = _client_with(fake_lambda, monkeypatch)
+
+    result = client.extract(b"bytes", script="english")
+
+    assert result.text == FAKE_OCR_DATA["text"]
+    assert len(fake_lambda.invoke_calls) == 1
+
+
+def test_english_is_still_rejected_when_it_is_not_the_configured_code(monkeypatch):
+    """Widening the guard must not admit every script — only the one code
+    configured for Latin text."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "ocr_lambda_english_script", "latin")
+    fake_lambda = FakeLambdaClient(_lambda_envelope({}))
+    client = _client_with(fake_lambda, monkeypatch)
+
+    with pytest.raises(OcrError, match="no recognition model"):
         client.extract(b"bytes", script="english")
 
     assert fake_lambda.invoke_calls == []

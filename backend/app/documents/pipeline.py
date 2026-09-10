@@ -9,7 +9,7 @@ from app.documents import classifier, extractor, lab_report, local_ocr, pdf_util
 from app.documents.docx_utils import extract_text as extract_docx_text
 from app.documents.geometry import Rect
 from app.documents.grounding import FieldResult, PipelineResult, ground
-from app.documents.ocr_client import OcrClient, OcrResult, SUPPORTED_SCRIPTS
+from app.documents.ocr_client import OcrClient, OcrError, OcrResult, SUPPORTED_SCRIPTS
 from app.config import get_settings
 from app.graph.config import get_graph_settings
 from app.llm.factory import get_llm_chain
@@ -862,33 +862,45 @@ def _process_image(
     budget = budget or cb.CallBudget.from_settings()
     media_type = content_type if content_type.startswith("image/") else "image/jpeg"
 
+    # Devanagari/Arabic/Tamil/Telugu/Kannada always go to the deepreef-ocr
+    # Lambda, in every environment. app_env does NOT apply here: local_ocr
+    # runs RapidOCR's bundled English/Latin model, which garbles non-Latin
+    # digits and table layout badly enough to misattribute whole rows.
     if script in SUPPORTED_SCRIPTS:
-
-        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}", data, _image_suffix(content_type), script, ocr_client)
-
-        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}", data, media_type)
-
-        return _process_ocr_result(ocr_client.extract(data, script), f"ocr:{script}", data, media_type, budget)
+        return _process_ocr_result(
+            ocr_client.extract(data, script), f"ocr:{script}", data, media_type, budget,
+        )
 
 
     if script == "english":
-        # Local RapidOCR (the same engine deepreef-ocr's Lambda runs, using
-        # its own bundled English/Latin default model instead of one of
-        # deepreef-ocr's baked non-English .onnx files) — real per-line
-        # bounding boxes, no cloud call, no rate limit, no AWS dependency for
-        # this script. Only falls through to the vision LLM below if it
-        # itself isn't usable (not installed, corrupt image, etc.).
-        try:
-
-            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english", data, _image_suffix(content_type), script, ocr_client)
-
-            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english", data, media_type)
-
-
-            return _process_ocr_result(local_ocr.extract_english(data), "rapidocr:english", data, media_type, budget)
-
-        except local_ocr.LocalOcrError:
-            pass
+        settings = get_settings()
+        if settings.app_env == "prod":
+            # Production reads English through the same deepreef-ocr Lambda
+            # every other script already uses, so one engine's behaviour is
+            # what ships. No local fallback on purpose: silently swapping
+            # engines would make an OCR outage look like a quality drop
+            # instead of an outage. A failure falls through to the vision LLM
+            # below, exactly as an unsupported script already does.
+            try:
+                return _process_ocr_result(
+                    ocr_client.extract(data, settings.ocr_lambda_english_script),
+                    "deepreef:english", data, media_type, budget,
+                )
+            except OcrError as exc:
+                log.warning("deepreef-ocr failed on an English page: %s", exc)
+        else:
+            # Local RapidOCR (the same engine deepreef-ocr's Lambda runs, using
+            # its own bundled English/Latin default model instead of one of
+            # deepreef-ocr's baked non-English .onnx files) — real per-line
+            # bounding boxes, no cloud call, no rate limit, no AWS dependency
+            # for this script. Only falls through to the vision LLM below if it
+            # itself isn't usable (not installed, corrupt image, etc.).
+            try:
+                return _process_ocr_result(
+                    local_ocr.extract_english(data), "rapidocr:english", data, media_type, budget,
+                )
+            except local_ocr.LocalOcrError:
+                pass
 
     # Any other script deepreef-ocr doesn't support, or a local-OCR failure:
     # there's no OCR text at all here, so read the page directly with a

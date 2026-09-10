@@ -47,7 +47,11 @@ class OcrClient:
         )
 
     def extract(self, image_bytes: bytes, script: str) -> OcrResult:
-        if script not in SUPPORTED_SCRIPTS:
+        # English is accepted only when it is the configured Latin code — the
+        # Lambda selects its recognition model from `script`, and the code it
+        # wants for Latin text is a setting (config.py's
+        # ocr_lambda_english_script) rather than a literal here.
+        if script not in SUPPORTED_SCRIPTS and script != get_settings().ocr_lambda_english_script:
             raise OcrError(
                 f"deepreef-ocr has no recognition model for script={script!r}; "
                 f"supported: {sorted(SUPPORTED_SCRIPTS)}"
