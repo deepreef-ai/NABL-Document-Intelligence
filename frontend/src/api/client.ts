@@ -165,6 +165,18 @@ export function uploadDocument(applicationId: string, file: File, script = "engl
   });
 }
 
+export function listDocuments(applicationId: string) {
+  return request<DocumentOut[]>(`/applications/${applicationId}/documents`);
+}
+
+/**
+ * One document's progress, without refetching it and all of its fields.
+ *
+ * Upload returns 202 as soon as the row exists and does the extraction
+ * afterwards, so the client has to ask when it has finished. `done` is the
+ * server's own verdict — the client must not infer it from `status`, since
+ * "failed" is finished too.
+ */
 export interface DocumentStatus {
   document_id: string;
   status: string;
@@ -175,34 +187,8 @@ export interface DocumentStatus {
   done: boolean;
 }
 
-/**
- * Cheap progress poll for one document.
- *
- * Upload returns 202 as soon as the row exists and extraction continues in
- * the background, so this is how the client learns it finished. Deliberately
- * not listDocuments(): that re-sends every extracted field, bbox and evidence
- * record for every document, which is a lot to fetch every two seconds when
- * the only question is whether this one is done.
- */
-export function getDocumentStatus(documentId: string): Promise<DocumentStatus> {
+export function getDocumentStatus(documentId: string) {
   return request<DocumentStatus>(`/documents/${documentId}/status`);
-}
-
-export function listDocuments(applicationId: string) {
-  return request<DocumentOut[]>(`/applications/${applicationId}/documents`);
-}
-
-/**
- * Remove an uploaded document, its fields and its stored bytes.
- *
- * 204, so there is no body to parse — `request` would choke on the empty
- * response, hence the bare fetch.
- */
-export async function deleteDocument(documentId: string): Promise<void> {
-  const resp = await fetch(`${API_BASE}/documents/${documentId}`, { method: "DELETE" });
-  if (!resp.ok) {
-    throw new Error(`${resp.status} ${resp.statusText}: ${await resp.text()}`);
-  }
 }
 
 export function reextractDocument(documentId: string, script = "english") {
@@ -218,22 +204,6 @@ export function renderDocumentUrl(documentId: string, page = 0) {
 /** The extraction in the labelled dataset's shape, for download or diffing. */
 export function structuredJsonUrl(documentId: string) {
   return `${API_BASE}/documents/${documentId}/structured`;
-}
-
-/** The compiled NABL form as a PDF, for the reviewer to keep or print. */
-export function formPdfUrl(applicationId: string) {
-  return `${API_BASE}/applications/${applicationId}/form.pdf`;
-}
-
-/**
- * The extraction in the labelled dataset's shape, as an object.
- *
- * 404 here is expected rather than exceptional: a document extracted before
- * this format existed has no structured record until it is re-extracted, and
- * the JSON panel says so instead of showing an error.
- */
-export function getStructured(documentId: string): Promise<unknown> {
-  return request<unknown>(`/documents/${documentId}/structured`);
 }
 
 export function getCompiledForm(applicationId: string, acceptedOnly = false) {

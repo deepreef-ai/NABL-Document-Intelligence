@@ -26,32 +26,6 @@
  * Classification is deterministic keyword matching, never a model: the label
  * sits beside a value someone is about to confirm, so it has to be
  * reproducible rather than merely plausible.
- *
- * ORDER follows the document, not the taxonomy. A reviewer reads the page on
- * the left and the form on the right at the same time, so the two have to run
- * in the same direction: a report that prints the patient block at the top of
- * page 1 gets a form that opens on Patient. Three signals decide, in order of
- * how much they can be trusted:
- *
- * 1. **Where the field was found** — page, then how far down the page. Only
- *    the grounded pipeline matches values back to a rectangle, so this is
- *    exact when it exists and absent when it does not.
- * 2. **The order the fields arrived in.** Chunked extraction reads the pages
- *    in order and returns fields in the order it read them, which on a real
- *    report runs patient, sample dates, results, footer, signature. This is
- *    what actually orders the form today: nothing in the current pipeline
- *    carries a bbox. It is a weaker signal than a rectangle — schema-driven
- *    rule extraction returns fields in the order of the SCHEMA — which is why
- *    a rectangle outranks it rather than the other way round.
- * 3. **The gold reading order**, for whatever the first two cannot separate.
- *
- * A section sits where it STARTS — the earliest of its fields — because that
- * is what "the patient block is at the top" means to someone reading the page.
- * The cost is that one misfiled field pulls its whole section up with it. The
- * alternative, a median, is steadier under misclassification but files a
- * section that opens at the top of page 1 below one that opens halfway down,
- * which is the worse failure: it breaks the one property this ordering exists
- * to provide, that the form and the page can be read side by side.
  */
 
 import type { ExtractedFieldOut } from "./client";
@@ -59,62 +33,6 @@ import { goldLabel, goldRank } from "./goldSections";
 
 export interface ReviewRow {
   field: ExtractedFieldOut;
-}
-
-/**
- * Where a set of fields sits in the document.
- *
- * `rect` is the page the earliest field was read from and how far down that
- * page it sat, or null when not even a page is known. `y` is Infinity for a
- * field whose page is known but which was never matched to a rectangle —
- * page 1 is still ahead of page 2, and within its own page it sorts after
- * everything that can say where it was. `arrival` is the earliest position in
- * the order the fields came back from extraction, which every field has.
- */
-export interface DocPlace {
-  rect: { page: number; y: number } | null;
-  arrival: number;
-}
-
-/** The front of an already-sorted list; undefined when there is nothing. */
-function first<T>(sorted: T[]): T | undefined {
-  return sorted[0];
-}
-
-/** Where these fields sit: where the earliest of them was found. */
-function placeOf(fields: ExtractedFieldOut[], arrivalOf: (f: ExtractedFieldOut) => number): DocPlace {
-  const located = fields
-    .filter((f) => f.source_page != null)
-    .map((f) => ({ page: f.source_page as number, y: f.source_bbox?.y ?? Number.POSITIVE_INFINITY }))
-    .sort((a, z) => a.page - z.page || (a.y === z.y ? 0 : a.y - z.y));
-
-  return {
-    rect: first(located) ?? null,
-    // An empty section sorts last rather than first — it says nothing about
-    // where it belongs, and guessing "the top" is the costly way to be wrong.
-    arrival: first(fields.map(arrivalOf).sort((a, z) => a - z)) ?? Number.POSITIVE_INFINITY,
-  };
-}
-
-/**
- * Sort comparator over document places: rectangles first where both sides
- * have one, then the order extraction returned the fields in. 0 means the two
- * sit in the same spot and the caller falls back to its own order.
- *
- * A section with rectangles is NOT ranked above one without. The two scales
- * are unrelated — points down a page against a position in a list — so a
- * mixed pair is compared on the signal they both have.
- */
-export function comparePlaces(a: DocPlace, z: DocPlace): number {
-  if (a.rect && z.rect) {
-    // Equality before subtraction: two ungrounded pages are both Infinity,
-    // and Infinity - Infinity is NaN, which a comparator must never return.
-    const byRect = a.rect.page - z.rect.page || (a.rect.y === z.rect.y ? 0 : a.rect.y - z.rect.y);
-    if (byRect !== 0) return byRect;
-  }
-  // Equality first: two empty sections are both Infinity, and subtracting
-  // those gives NaN, which a sort comparator must never see.
-  return a.arrival === z.arrival ? 0 : a.arrival - z.arrival;
 }
 
 export interface ReviewRecord {
@@ -127,7 +45,6 @@ export interface ReviewSubgroup {
   heading: string;
   rows: ReviewRow[];
   records: ReviewRecord[];
-  place: DocPlace;
 }
 
 export interface ReviewGroup {
@@ -135,7 +52,6 @@ export interface ReviewGroup {
   subgroups: ReviewSubgroup[];
   total: number;
   needsReview: number;
-  place: DocPlace;
 }
 
 const INDEXED = /^([A-Za-z0-9_]+)\[(\d+)\]\.(.+)$/;
@@ -200,13 +116,6 @@ export function groupReviewFields(
   fields: ExtractedFieldOut[],
   threshold: number,
 ): ReviewGroup[] {
-  // The order extraction returned the fields in — see the ordering note at the
-  // top of the file. Captured before anything is grouped, because grouping is
-  // what loses it.
-  const arrival = new Map(fields.map((f, i) => [f.id, i]));
-  const arrivalOf = (f: ExtractedFieldOut) => arrival.get(f.id) ?? fields.length;
-  const place = (rows: ReviewRow[]) => placeOf(rows.map((r) => r.field), arrivalOf);
-
   // section -> sub-heading -> { rows, records }
   const tree = new Map<string, Map<string, { rows: ReviewRow[]; records: Map<string, ReviewRow[]> }>>();
 
@@ -268,42 +177,80 @@ export function groupReviewFields(
     let total = 0;
     let needsReview = 0;
 
-    const groupRows: ReviewRow[] = [];
-
     for (const [sub, b] of subs) {
       const all = [...b.rows, ...[...b.records.values()].flat()];
       total += all.length;
       needsReview += all.filter((r) => r.field.confidence < threshold).length;
-      groupRows.push(...all);
       subgroups.push({
         heading: sub,
         rows: b.rows,
         records: [...b.records.entries()]
           .sort((a, z) => Number(a[0].slice(1)) - Number(z[0].slice(1)))
           .map(([, rows], i) => ({ label: recordLabel(rows, i), rows })),
-        place: place(all),
       });
     }
 
-    // Sub-headings run in the order the document printed them. Alphabetical
-    // stays the fallback: it is at least stable, and an unnamed sub-heading —
-    // the fields the document did not file anywhere — belongs last.
+    // An unnamed sub-heading holds the fields the document did not file
+    // anywhere, so it belongs last rather than first.
     subgroups.sort((a, z) => {
-      const byPlace = comparePlaces(a.place, z.place);
-      if (byPlace !== 0) return byPlace;
       if ((a.heading === NO_SUBHEADING) !== (z.heading === NO_SUBHEADING)) {
         return a.heading === NO_SUBHEADING ? 1 : -1;
       }
       return a.heading.localeCompare(z.heading);
     });
 
-    groups.push({ heading, subgroups, total, needsReview, place: place(groupRows) });
+    groups.push({ heading, subgroups, total, needsReview });
   }
 
-  // Document order, so the form runs down the page the way the page does: the
-  // patient block above the results if that is how the report was printed.
-  // Gold reading order — who ran the test, for whom, on what, what came back —
-  // settles whatever the document cannot.
-  groups.sort((a, z) => comparePlaces(a.place, z.place) || goldRank(a.heading) - goldRank(z.heading));
+  /**
+   * Sections run in the order the DOCUMENT prints them, not in a fixed
+   * taxonomy order.
+   *
+   * The reviewer reads the form against the scan beside it, so a form whose
+   * sections are in a different order to the page forces them to hunt for
+   * each block. A test report that opens with its report number and date
+   * should open with "Report" here too, whatever a canonical ordering says.
+   *
+   * First appearance in `fields` is the signal: the backend emits fields in
+   * the order it read them off the page, so the section a field first turns
+   * up in is the order that section was printed. Geometry would be the
+   * obvious alternative, but source_bbox is null on most documents and
+   * source_page is 0 for every field of a single-page one, so it cannot
+   * order anything.
+   *
+   * goldRank stays as the tie-breaker: it decides sections whose fields
+   * interleave, and orders a document that carries no usable field order at
+   * all exactly as it did before.
+   */
+  const firstSeen = new Map<string, number>();
+  fields.forEach((f, i) => {
+    const heading = goldLabel(f.group);
+    if (!firstSeen.has(heading)) firstSeen.set(heading, i);
+  });
+
+  /**
+   * The laboratory block is pinned first, whatever the field order says.
+   *
+   * It is the letterhead, and the letterhead is the top of the page on
+   * essentially every report and certificate this handles. But it is
+   * EXTRACTED last — MEASURED on a two-page test report, the body text came
+   * back as fields 1-10 and the letterhead (lab name, telephone, mobile,
+   * website, ISO line) as 11-17, because the letterhead is an image and the
+   * pass that reads it runs after the text layer. Sorting purely on
+   * appearance therefore puts the top of the document at the bottom of the
+   * form.
+   *
+   * Nothing in the data distinguishes a letterhead field from a body one —
+   * same `source`, and `source_page` is 0 for both — so the position cannot
+   * be recovered and has to be asserted here.
+   */
+  const LETTERHEAD = goldLabel("lab_info");
+  const appearance = (heading: string) =>
+    heading === LETTERHEAD ? -1 : firstSeen.get(heading) ?? Number.MAX_SAFE_INTEGER;
+
+  groups.sort((a, z) => {
+    const byDocument = appearance(a.heading) - appearance(z.heading);
+    return byDocument !== 0 ? byDocument : goldRank(a.heading) - goldRank(z.heading);
+  });
   return groups;
 }

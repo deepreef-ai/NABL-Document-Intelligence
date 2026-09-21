@@ -13,14 +13,26 @@
  * it is the labelled dataset's, and this file is downstream of it.
  */
 
-/** Human labels for the gold keys. Keep in step with SECTION_LABELS in structured.py. */
+/**
+ * Human labels for the gold keys. Keep in step with SECTION_LABELS in
+ * structured.py.
+ *
+ * The `*_info` sections read as "<thing> Details": a heading of just
+ * "Client" names the party, where what follows it is the set of details
+ * ABOUT that party, and on a page of stacked headings the bare nouns read as
+ * labels for a single value rather than as section titles.
+ *
+ * The rest keep their own names. "Findings", "Signatories", "Notes" and
+ * "Test Results" already describe their contents, so "Notes Details" would
+ * be padding.
+ */
 const LABELS: Record<string, string> = {
-  document_info: "Document",
-  lab_info: "Laboratory",
-  client_info: "Client",
-  patient_info: "Patient",
-  sample_info: "Sample",
-  report_info: "Report",
+  document_info: "Document Details",
+  lab_info: "Laboratory Details",
+  client_info: "Client Details",
+  patient_info: "Patient Details",
+  sample_info: "Lab Sample Details",
+  report_info: "Report Details",
   findings: "Findings",
   signatories: "Signatories",
   notes: "Notes",
@@ -60,11 +72,17 @@ export function goldRank(label: string): number {
   return index === -1 ? ORDER.length : index;
 }
 
-/** "lab_panel_results" -> "Lab Panel Results", for gold keys not in LABELS. */
+/**
+ * "lab_panel_results" -> "Lab Panel Results", for gold keys not in LABELS.
+ *
+ * A key the backend adds later that follows the `*_info` convention gets the
+ * same "<thing> Details" treatment as the ones named above, so a new section
+ * does not arrive on screen reading "Equipment Info" beside "Client Details".
+ */
 function titleCaseKey(key: string): string {
-  return key
-    .split("_")
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+  const words = key.split("_").filter(Boolean);
+  if (words.length > 1 && words[words.length - 1] === "info") {
+    words[words.length - 1] = "details";
+  }
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
