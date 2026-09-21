@@ -1,22 +1,111 @@
+/**
+ * Tokens and element defaults. Everything with a class name lives in App.css.
+ *
+ * The palette is fixed light — `color-scheme: light` rather than
+ * `light dark`. This screen is a document facsimile next to the values read
+ * off it, and a reviewer confirming a value has to trust that what they see
+ * is what the page printed; a dark repaint of a scanned sheet is a different
+ * image from the one that was scanned.
+ */
+
 :root {
-  color-scheme: light dark;
-  font: 15px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --border: #e4e1d8;
+  --divider: #edeae1;
+  --ink: #1c1f1d;
+  --ink-2: #5f645d;
+  --ink-3: #8a8f86;
+  --chip: #f0eee7;
+  --accent: #1f5c4d;
+  --accent-tint: #e9f2ee;
+  --accent-deep: #17463b;
+  --confirmed: #f1f7f4;
+  --dark: #16241f;
+  --dark-2: #12201b;
+  --warn-ink: #8a3a12;
+  --warn-bg: #fbe3d3;
+  --warn-tint: #fdf6f1;
+  --navy: #12324a;
+  --btn-border: #d7d3c8;
+  --disabled-bg: #dedbcf;
+  --disabled-ink: #7c8078;
+
+  --sans: "Public Sans", system-ui, "Segoe UI", sans-serif;
+  --serif: "Source Serif 4", Georgia, serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  --r-card: 14px;
+  --r-field: 12px;
+  --r-control: 10px;
+  --r-pill: 999px;
+
+  /* The tab strip is sticky, so the document column parks just under it. */
+  --strip-h: 74px;
+
+  font: 400 13px/1.55 var(--sans);
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
 }
 
 h1,
 h2,
-h3 {
+h3,
+h4 {
+  font-family: var(--serif);
   font-weight: 600;
-  margin: 0 0 8px;
+  letter-spacing: -0.012em;
+  margin: 0;
 }
 
 p {
   margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* Off-screen but still in the accessibility tree — used for the file input,
+   the search label and the chat input's label. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

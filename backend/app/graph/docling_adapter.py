@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
@@ -197,6 +198,96 @@ def _build_converter() -> _Converter:
     )
 
 
+# Constructing a DocumentConverter loads Docling's layout and table models.
+# MEASURED 2026-09-21 on this machine: ~30s in a fresh process with the models
+# already on disk (~112s the very first time, including the download), and
+# 0.06s for a second construction in the same process — Docling caches the
+# weights internally once loaded.
+#
+# Two things made that cost land on a user:
+#   1. parse_document_with_docling() called _build_converter per document, so
+#      every upload after a restart paid it.
+#   2. the factory is invoked *inside* _convert_with_timeout's worker thread,
+#      so the build also ate into the docling timeout budget.
+#
+# The cache below fixes both, and get_converter() is warmed at application
+# startup (see app/main.py) so the wait happens during boot rather than in
+# front of the first upload.
+_converter_lock = threading.Lock()
+_converter: _Converter | None = None
+
+
+def get_converter() -> _Converter:
+    """Return the process-wide Docling converter, building it once.
+
+    A lock rather than a bare ``lru_cache``: uploads run concurrently, and
+    ``lru_cache`` does not hold a lock across the miss, so two simultaneous
+    first requests would each pay the full ~30s build. Here the second waits
+    for the first.
+
+    Reusing one converter across threads is Docling's own documented pattern,
+    and is what ``_convert_with_timeout``'s docstring already assumes when it
+    chooses a thread over a process to avoid reloading weights per document.
+    """
+    global _converter
+
+    if _converter is not None:
+        return _converter
+
+    with _converter_lock:
+        # Re-checked inside the lock: another thread may have built it while
+        # this one waited.
+        if _converter is None:
+            started = time.monotonic()
+            _converter = _build_converter()
+            log.info(
+                "docling_converter_built duration=%.2fs",
+                time.monotonic() - started,
+            )
+        return _converter
+
+
+def warm_docling_converter() -> bool:
+    """Build the converter ahead of the first request.
+
+    Never raises: a warm-up failure must not stop the application from
+    starting. Docling is optional, and ``parse_document_with_docling`` already
+    falls back cleanly when it is unavailable — this only moves *when* the cost
+    is paid, never whether the feature works.
+
+    Returns True when a converter is ready.
+    """
+    if not docling_available():
+        log.info("docling_warmup_skipped reason=docling-not-installed")
+        return False
+
+    started = time.perf_counter()
+    try:
+        get_converter()
+    except Exception as exc:  # noqa: BLE001 — startup must survive any failure
+        log.warning(
+            "docling_warmup_failed error=%s detail=%s",
+            type(exc).__name__,
+            str(exc)[:200],
+        )
+        return False
+
+    log.info("docling_warmup_completed duration=%.2fs", time.perf_counter() - started)
+    return True
+
+
+def converter_is_warm() -> bool:
+    """Whether the converter has already been built (used by /health)."""
+    return _converter is not None
+
+
+def reset_converter_cache() -> None:
+    """Drop the cached converter. For tests only."""
+    global _converter
+    with _converter_lock:
+        _converter = None
+
+
 # --------------------------------------------------------------------------
 # parse
 # --------------------------------------------------------------------------
@@ -230,7 +321,7 @@ def parse_document_with_docling(
     if not os.path.exists(file_path):
         return DoclingResult(fallback_reason=f"file not found: {os.path.basename(file_path)}")
 
-    factory = converter_factory or (_build_converter if docling_available() else None)
+    factory = converter_factory or (get_converter if docling_available() else None)
     if factory is None:
         return DoclingResult(fallback_reason="docling is not installed")
 

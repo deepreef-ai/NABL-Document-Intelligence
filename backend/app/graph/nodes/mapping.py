@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Any, get_args, get_origin
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
@@ -43,6 +43,8 @@ from app.graph.schemas import (
 )
 from app.graph.state import GraphState
 
+from app import observability as _obs
+
 log = logging.getLogger(__name__)
 
 NODE = "form_mapping"
@@ -52,12 +54,52 @@ _EXACT_MATCH_THRESHOLD = 0.97
 
 
 class _RawMapping(BaseModel):
+    """One model-proposed mapping.
+
+    Every string field coerces null to "". MEASURED 2026-09-21: Nova returns
+    ``"source_field": null`` for a target it could not match — which is the
+    honest answer, and exactly what NOT_FOUND means — but a bare ``str``
+    default rejects null rather than falling back to it. Pydantic then failed
+    the WHOLE reply on the first such entry:
+
+        reply did not match _MappingSet: mappings.0.source_field
+        Input should be a valid string, input: None
+
+    Both attempts failed the same way, so form mapping spent ~27s per document
+    and returned nothing: all 102 target fields were recorded NOT_FOUND and the
+    application form was never auto-filled. The downstream code already treats
+    a missing source correctly (``if src is None and raw.source_field``), so
+    the model was the only thing rejecting it.
+    """
+
     source_field: str = ""
     target_field: str = ""
     source_field_uid: str = ""
     mapping_confidence: float = 0.0
     mapping_reason: str = ""
     mapping_status: str = "NOT_FOUND"
+
+    @field_validator(
+        "source_field", "target_field", "source_field_uid",
+        "mapping_reason", "mapping_status",
+        mode="before",
+    )
+    @classmethod
+    def _null_to_default(cls, v: object) -> object:
+        """A null string becomes the field's default rather than an error."""
+        return "" if v is None else v
+
+    @field_validator("mapping_confidence", mode="before")
+    @classmethod
+    def _null_confidence(cls, v: object) -> object:
+        return 0.0 if v is None else v
+
+    @field_validator("mapping_status", mode="after")
+    @classmethod
+    def _default_status(cls, v: str) -> str:
+        # An empty status is not a valid MappingStatus; NOT_FOUND is the
+        # honest reading of "the model said nothing".
+        return v or "NOT_FOUND"
 
 
 class _MappingSet(BaseModel):
@@ -200,6 +242,11 @@ def map_to_form(state: GraphState) -> dict:
         NODE, "deterministic_pass",
         f"{len(mappings)} of {len(schema.fields)} target field(s) matched by name",
     )
+    _obs.log.info(
+        "form_mapping_pass1 job=%s matched=%d targets=%d sources=%d unmapped=%d",
+        _obs.get_job_id(), len(mappings), len(schema.fields), len(sources),
+        len(unmapped_targets),
+    )
 
     # ---- pass 2: semantic mapping ----------------------------------------
     if unmapped_targets and sources:
@@ -215,11 +262,37 @@ def map_to_form(state: GraphState) -> dict:
              "section": f.section_name, "page": f.page_number}
             for f in sources[:300]
         ]
+        # These caps silently drop content on a large document: a 17-page PDF
+        # can yield more than 300 extracted fields, and any beyond the cap are
+        # never offered to the mapper, so their values cannot reach the form.
+        # Logged rather than raised for now - changing the cap changes both
+        # cost and accuracy, so it needs a measured decision, not a guess.
+        if len(unmapped_targets) > 200 or len(sources) > 300:
+            _obs.log.warning(
+                "form_mapping_truncated job=%s targets=%d/%d sources=%d/%d "
+                "- fields beyond the cap cannot be mapped to the form",
+                _obs.get_job_id(), min(len(unmapped_targets), 200), len(unmapped_targets),
+                min(len(sources), 300), len(sources),
+            )
 
-        outcome = call_structured(
-            node=NODE, system=MAPPING_SYSTEM,
-            user_text=mapping_user(target_payload, source_payload),
-            output_model=_MappingSet, max_attempts=2, on_metric=metrics.record,
+        # The single LLM call this node makes. Timed on its own because the
+        # node measured ~28s on three different documents - a cost that
+        # constant points at one fixed-size request, not at the content.
+        _user_text = mapping_user(target_payload, source_payload)
+        with _obs.stage(
+            "form_mapping_llm",
+            targets=len(target_payload),
+            sources=len(source_payload),
+            prompt_chars=len(_user_text),
+        ):
+            outcome = call_structured(
+                node=NODE, system=MAPPING_SYSTEM,
+                user_text=_user_text,
+                output_model=_MappingSet, max_attempts=2, on_metric=metrics.record,
+            )
+        _obs.log.info(
+            "form_mapping_llm_result job=%s ok=%s attempts=%s",
+            _obs.get_job_id(), outcome.ok, outcome.attempts,
         )
 
         if not outcome.ok:

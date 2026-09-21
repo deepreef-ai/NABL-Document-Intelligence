@@ -3,13 +3,17 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+import logging
+
 from app.config import get_settings
 from app.db import get_db
 from app.documents.compiler import compile_form
+from app.graph import database as graph_db
 from app.documents.extraction_report import ExtractionReport
 from app.documents.form_pdf import render_form_pdf
 from app.models import Application, Document, ExtractedField
 
+log = logging.getLogger(__name__)
 router = APIRouter(tags=["review"])
 
 
@@ -31,9 +35,26 @@ def get_compiled_form(application_id: str, accepted_only: bool = False, db: Sess
     documents = db.query(Document).filter(Document.application_id == application_id).all()
     threshold = get_settings().confidence_threshold
 
+    compiled = compile_form(application.form_type, documents, accepted_only=accepted_only)
+    # Graph readings are attached HERE rather than inside compile_form: the
+    # agentic pipeline keeps its own database (graph_storage/graph.db), which
+    # compile_form has no session for and should not acquire — it compiles
+    # whatever documents it is handed, and stays unit-testable because of it.
+    # They land in their own `agentic_extraction_results` key, never merged
+    # into `test_results` or `chart_readings`; see
+    # BaseNablForm.agentic_extraction_results for why the shapes must not be
+    # flattened together. A failure to read that store degrades to an empty
+    # list rather than taking down the form a reviewer is waiting on.
+    try:
+        compiled["agentic_extraction_results"] = graph_db.readings_for_application(application_id)
+    except Exception:  # noqa: BLE001 — the legacy form is still worth returning
+        log.warning("could not read agentic pipeline results for application %s",
+                    application_id, exc_info=True)
+        compiled["agentic_extraction_results"] = []
+
     return {
         "form_type": application.form_type,
-        "form": compile_form(application.form_type, documents, accepted_only=accepted_only),
+        "form": compiled,
         "confidence_threshold": threshold,
         "documents": [
             {

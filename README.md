@@ -136,44 +136,39 @@ as terminology reference (MU vs. CMC, Z-score vs. En-value), not modeled as a fo
 
 ## Running locally
 
-### 1. deepreef-ocr (optional — only needed for devanagari/arabic/ta/te/ka scans)
-
-The `akash-ocr` Lambda is invoked directly via boto3 (`lambda:InvokeFunction`) — same mechanism
-`pcsapaiv2` production uses. You need AWS credentials in the environment (profile or access keys)
-with `lambda:InvokeFunction` on that function; set `OCR_LAMBDA_FUNCTION_NAME`/`OCR_LAMBDA_REGION`
-in `backend/.env` if it differs from the defaults. English documents never need this — see "Known
-limitation" below.
-
-### 2. Backend
+Full instructions, configuration reference and the known gotchas are in **[SETUP.md](SETUP.md)**.
+The short version:
 
 ```bash
+# backend — first start builds the Docling converter (~110s) before uploads work
 cd backend
-python -m venv .venv
-.venv/Scripts/activate        # .venv/bin/activate on macOS/Linux
+python -m venv .venv && .venv/Scripts/activate   # .venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
-cp .env.example .env          # set NOVA_MODEL and make sure AWS credentials are available
+cp .env.example .env                              # Nova authenticates via the AWS chain
 uvicorn app.main:app --reload --port 8000
-```
 
-`GET http://localhost:8000/health` should return `{"status": "ok"}`.
-
-Run the test suite (no API key or live OCR service needed — the LLM/OCR calls are mocked):
-
-```bash
-pytest
-```
-
-### 3. Frontend
-
-```bash
+# frontend — in a second terminal. No .env to copy; frontend/.env already exists.
 cd frontend
 npm install
-cp .env.example .env
 npm run dev
 ```
 
-Open `http://localhost:5173`. Pick a form type → answer the eligibility questions → upload
-documents → review & confirm the auto-filled form.
+Open <http://localhost:5173>, which lands straight on the upload screen — there is no login and
+no eligibility wizard. Upload a document, wait for it to extract, then review and confirm the
+auto-filled form.
+
+Two things worth knowing before you file a bug:
+
+- **The frontend must run on port 5173.** The backend's CORS allowlist is pinned to it, so on any
+  other port the page loads and every request fails. See SETUP.md.
+- **Extraction is slow** — roughly 2 minutes for a single page, ~20 for a 17-page PDF, nearly all
+  of it waiting on the LLM.
+
+Tests need no credentials and make no network calls; the LLM and OCR calls are mocked:
+
+```bash
+cd backend && pytest
+```
 
 ## What happens without any LLM key set
 

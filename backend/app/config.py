@@ -17,6 +17,16 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
+    # Logging. The app had no logging configuration at all, so every
+    # log.info() in this codebase was silently discarded: uvicorn configures
+    # its own loggers only, and the root logger defaults to WARNING. That hid
+    # the existing diagnostics as well as the stage timings added in
+    # app/observability.py. Set to WARNING to quieten, DEBUG to trace.
+    log_level: str = "INFO"
+    # Stage timings are useful in dev and noisy in a tight production loop,
+    # so they can be silenced without turning down every other INFO line.
+    log_stage_timings: bool = True
+
     # LLM — powers the wizard chat, classification, and extraction. Amazon
     # Nova on AWS Bedrock (llm/providers.py's NovaProvider) is the primary
     # provider: no API key setting for it — it authenticates via the ambient
@@ -196,6 +206,15 @@ class Settings(BaseSettings):
     # server happened to be started.
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+
+    @field_validator("log_level")
+    @classmethod
+    def _valid_log_level(cls, v: str) -> str:
+        level = (v or "INFO").strip().upper()
+        allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+        if level not in allowed:
+            raise ValueError(f"log_level must be one of {sorted(allowed)}, got {v!r}")
+        return level
 
     @field_validator("storage_dir", "qdrant_storage_dir")
     @classmethod

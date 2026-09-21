@@ -47,6 +47,7 @@ def _initial_state(
     target_form_schema: dict | None = None,
     display_name: str = "",
     script: str = "english",
+    application_id: str = "",
 ) -> GraphState:
     schema = None
     if target_form_schema:
@@ -57,6 +58,7 @@ def _initial_state(
 
     return GraphState(
         document_id=document_id,
+        application_id=application_id,
         file_path=file_path,
         display_name=display_name,
         script=script,
@@ -80,6 +82,7 @@ def run_document(
     target_form_schema: dict | None = None,
     display_name: str = "",
     script: str = "english",
+    application_id: str = "",
     checkpointer=None,
 ) -> FinalResult:
     """Process one document start to finish."""
@@ -90,11 +93,18 @@ def run_document(
     state = _initial_state(
         document_id=document_id, file_path=file_path, display_name=display_name,
         form_id=form_id, target_form_schema=target_form_schema, script=script,
+        application_id=application_id,
     )
 
     started = time.monotonic()
+    # Bind the correlation id for every stage line this run emits. The
+    # document id is used rather than a fresh uuid so a log line joins
+    # straight back to a database row.
+    from app.observability import job_context, stage
+
     try:
-        final = app.invoke(state, config=_config(document_id))
+        with job_context(document_id), stage("pipeline_total", doc=document_id):
+            final = app.invoke(state, config=_config(document_id))
     except Exception as exc:  # noqa: BLE001 — a graph-level crash still owes a result
         log.exception("graph run failed for %s", document_id)
         state.final_status = FinalStatus.REJECTED

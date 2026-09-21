@@ -1,5 +1,6 @@
 from app.llm.base import LlmProviderError
 from app.llm.factory import get_llm_chain
+from app.documents import call_budget as cb
 
 # One global list works across all 9 NABL form types without threading
 # form_type through classification: names are distinct enough (accreditation
@@ -124,3 +125,32 @@ def classify_locally(text: str, page_count: int, form_type: str) -> tuple[str, f
     if hits >= _MIN_SECTION_HITS:
         return "completed_application_form", 0.9
     return None
+
+
+def classify(
+    text: str, page_count: int, form_type: str,
+    filename: str = "", budget: "cb.CallBudget | None" = None,
+) -> tuple[str, float]:
+    """The one entry point callers should use: local check first, LLM second.
+
+    classify_locally() short-circuits the single doc_type worth skipping a
+    call for and returns None otherwise, so the fallback to classify_text()
+    is what makes it usable — every caller was open-coding that same pair.
+
+    `budget` gates only the LLM leg, matching how the vision path already
+    spends a CLASSIFICATION call: an exhausted budget yields ("other", 0.0)
+    rather than raising, because a document that could not be classified
+    still has to flow through the rest of the pipeline. The local leg is
+    free and so is never gated.
+
+    `filename` is accepted because callers pass it positionally, but neither
+    classifier consumes it yet — it is a hint for a future heuristic, not a
+    signal that is currently read. It is named rather than dropped so the
+    call sites keep documenting what they know about the document.
+    """
+    local = classify_locally(text, page_count, form_type)
+    if local is not None:
+        return local
+    if budget is not None and not budget.spend(cb.CLASSIFICATION):
+        return "other", 0.0
+    return classify_text(text)

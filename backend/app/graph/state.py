@@ -63,6 +63,11 @@ class GraphState(BaseModel):
 
     # ---- identity / input ------------------------------------------------
     document_id: str
+    #: The NABL application this run was started from, when there is one.
+    #: Carried purely so persistence can record it (see database.save_run):
+    #: no node reads it, and extraction behaviour does not depend on it.
+    #: Empty means the graph was used standalone, which is supported.
+    application_id: str = ""
     file_path: str = ""
     file_name: str = ""
     #: Script of any scanned page, as chosen on upload ("english",

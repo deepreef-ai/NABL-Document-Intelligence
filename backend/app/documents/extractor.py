@@ -443,7 +443,7 @@ def extract_full_form_fields_chunked(form_type: str, chunks: list[str]) -> tuple
             log.warning("extract_full_form_fields_chunked: chunk %d failed, skipping: %s", i, exc)
             warnings.append(f"chunk {i} could not be extracted: {exc}")
             continue
-        all_fields.extend(_renumber_chunk_fields(chunk_fields, offsets))
+        all_fields.extend(renumber_chunk_fields(chunk_fields, offsets))
     return all_fields, warnings
 
 
@@ -499,7 +499,7 @@ def _extract_full_form_chunk(field_templates: list[str], text: str) -> list[dict
 _INDEXED_FIELD = re.compile(r"^(\w+)\[(\d+)\]\.(.+)$")
 
 
-def _renumber_chunk_fields(chunk_fields: list[dict], offsets: dict[str, int]) -> list[dict]:
+def renumber_chunk_fields(chunk_fields: list[dict], offsets: dict[str, int]) -> list[dict]:
     """Remap one chunk's own equipment[0]/equipment[1]/... indices onto a
     running global offset per list attribute, mutating `offsets` in place so
     the next chunk continues from where this one left off."""

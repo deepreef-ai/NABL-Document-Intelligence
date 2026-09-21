@@ -201,12 +201,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function submitDocument(
   file: File,
-  options: { formId?: string; targetFormSchema?: unknown } = {},
+  options: { formId?: string; targetFormSchema?: unknown; applicationId?: string } = {},
 ): Promise<{ document_id: string; status: string; poll: string }> {
   const body = new FormData();
   body.append("file", file);
   if (options.formId) body.append("form_id", options.formId);
   if (options.targetFormSchema) body.append("target_form_schema", JSON.stringify(options.targetFormSchema));
+  // Optional. Supplying it is what links this run to a NABL application, so
+  // its readings appear under `agentic_extraction_results` in that compiled
+  // form. Without it the run is standalone — still processed, still readable
+  // on the Graph Extraction screen, just not attached to any form.
+  if (options.applicationId) body.append("application_id", options.applicationId);
   return request(`/graph/documents`, { method: "POST", body });
 }
 

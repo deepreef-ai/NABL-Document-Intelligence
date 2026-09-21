@@ -59,6 +59,15 @@ def compile_form(
     all_fields_seen = []
 
     for doc in documents:
+        # Result-table rows live on Document.tests_json, NOT among doc.fields,
+        # so the loop below could never see them and the compiled form came
+        # back with no table at all on documents whose table WAS read
+        # correctly. Carried here before the `if not fields: continue` guard
+        # on purpose: a pure results document (a lab report with a big table
+        # and almost no header metadata) can have zero schema-mapped fields
+        # and still be the only thing in the application worth showing.
+        _collect_test_rows(form, doc)
+
         fields = [f for f in doc.fields if not accepted_only or f.accepted]
         if not fields:
             continue
@@ -103,6 +112,140 @@ def compile_form(
         report.conflicts.extend(detect_conflicts(all_fields_seen))
 
     return form.model_dump(mode="json")
+
+
+# A unit glued onto the end of a reference range ("<= 1 mg/dL", "3.50-5.00
+# g/dl") or of the result itself ("3.5 %"). Used only to fill a unit the
+# extractor left empty — never to overwrite one it found.
+_TRAILING_UNIT = re.compile(
+    r"(?:^|[\s\d\)\]])("
+    r"(?:mg|g|kg|ug|µg|mcg|ng|pg|IU|mIU|mmol|umol|µmol|nmol|mEq|cfu|CFU|ppm|ppb|"
+    r"kcal|cal|mL|ml|L|dL|dl|cm|mm|sec|min)"
+    r"(?:\s*/\s*(?:d?[lL]|m?[lL]|g|kg|mg|hr|h|day|m3|mm3|uL|µL|cumm|cu\s*mm))?"
+    r"|%"
+    r")\s*$"
+)
+
+_TEST_ROW_COLUMNS = ("test_name", "result", "unit", "reference_range", "method",
+                     "flag", "specimen", "section", "panel_name", "s_no",
+                     "page_number", "sample_date")
+
+
+def recover_unit(row: dict) -> str | None:
+    """The unit for a row whose `unit` column came back empty, when the unit
+    is visible elsewhere in the SAME row.
+
+    Deliberately narrow. MEASURED across 1,267 real extracted rows: 414 have
+    no unit, and 356 of those are qualitative results (NEG / Absent / A2A2 /
+    pH) that correctly have none. Only rows carrying the unit in their own
+    reference range or result text can be filled without inventing anything,
+    so that is all this does — it does not guess a unit from the test name,
+    which would be fabrication dressed up as recovery.
+
+    The bigger unit gap is a whole table column being missed at extraction
+    time (19 documents came back with 0% units), and no post-processing can
+    fix that — the data is not in the row to recover. See the extraction
+    prompt, not here."""
+    if row.get("unit") and str(row["unit"]).strip():
+        return None
+    for source in ("reference_range", "result"):
+        text = str(row.get(source) or "").strip()
+        if not text:
+            continue
+        match = _TRAILING_UNIT.search(text)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def split_chart_series(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Separate points read off a trend CHART from real results-table rows.
+
+    Returns (table_rows, chart_rows).
+
+    A results table states each analyte ONCE and gives it a reference range.
+    A chart series repeats one analyte many times, each point carrying its
+    own date and no range — so the rule is: three or more rows sharing a test
+    name, none with a reference range, every one with a DISTINCT date.
+
+    All three conditions are required, and the counter-examples are why.
+    MEASURED across 1,267 real rows: this moves 33 (2.6%), every one of them
+    the HbA1c scatter chart in 001_Lab-report.png. It correctly leaves alone
+    'uric acid' repeated 3x in AH3500627 (it has ranges, no dates) and a test
+    report number repeated 13x in certificate.pdf (no ranges, but only 2
+    distinct dates, so not one-point-per-date).
+
+    Deliberately conservative: misfiling a real table row as a chart point
+    would hide a genuine result, which is far worse than leaving a chart
+    point in the table.
+    """
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_name[str(row.get("test_name") or "").strip().lower()].append(row)
+
+    chart_ids: set[int] = set()
+    for name, members in by_name.items():
+        if not name or len(members) < 3:
+            continue
+        if any(str(m.get("reference_range") or "").strip() for m in members):
+            continue
+        dates = [str(m.get("sample_date") or "").strip() for m in members]
+        if not all(dates) or len(set(dates)) != len(members):
+            continue
+        chart_ids.update(id(m) for m in members)
+
+    table_rows = [r for r in rows if id(r) not in chart_ids]
+    chart_rows = [r for r in rows if id(r) in chart_ids]
+    return table_rows, chart_rows
+
+
+def _collect_test_rows(form, doc) -> None:
+    """Append one document's result-table rows to form.test_results, and any
+    trend-chart points to form.chart_readings instead.
+
+    Tagged with the source document so a multi-report application does not
+    silently merge two labs' tables into one list a reviewer cannot tell
+    apart."""
+    # getattr, not attribute access: callers pass anything with `fields` and
+    # `doc_type` — the tests use SimpleNamespace stand-ins, and a document
+    # that predates tests_json has None. Neither is an error, and neither
+    # should take down compiling the rest of the form.
+    rows = getattr(doc, "tests_json", None) or []
+    if not isinstance(rows, list) or not hasattr(form, "test_results"):
+        return
+    rows = [r for r in rows if isinstance(r, dict)]
+    table_rows, chart_rows = split_chart_series(rows)
+    name = getattr(doc, "filename", None)
+
+    def _carry(row: dict) -> dict | None:
+        carried = {k: v for k, v in row.items() if k in _TEST_ROW_COLUMNS and _is_meaningful(v)}
+        if not carried:
+            return None
+        recovered = recover_unit(row)
+        if recovered:
+            carried["unit"] = recovered
+            carried["unit_source"] = "derived_from_reference_range"
+        if name:
+            carried["source_document"] = name
+        return carried
+
+    for row in table_rows:
+        carried = _carry(row)
+        if carried is not None:
+            form.test_results.append(carried)
+
+    if not hasattr(form, "chart_readings"):
+        return
+    for row in chart_rows:
+        carried = _carry(row)
+        if carried is None:
+            continue
+        # Named so a reader can see at a glance why this point is not in the
+        # results table: it is a plotted historical reading, not this
+        # report's own measurement.
+        carried["reading_source"] = "trend_chart"
+        carried["series_name"] = row.get("test_name")
+        form.chart_readings.append(carried)
 
 
 def detect_conflicts(fields: list) -> list[FieldConflict]:

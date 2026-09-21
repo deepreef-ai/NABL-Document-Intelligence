@@ -65,6 +65,9 @@ def test_born_digital_pdf_path_grounds_extracted_value_to_its_span(monkeypatch):
         spans=[("GST Number: 27ABCDE1234F1Z5", Rect(x=1, y=2, w=3, h=4))],
     )
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
     monkeypatch.setattr(
@@ -120,6 +123,9 @@ def test_completed_application_form_routes_to_rag_pipeline(monkeypatch):
         SimpleNamespace(page_number=1, text="page two text, long enough to count as a real text layer", spans=[]),
     ]
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -176,6 +182,9 @@ def test_rag_pipeline_keeps_other_sections_when_one_sections_llm_chain_is_exhaus
         SimpleNamespace(page_number=1, text="page two text, long enough to count as a real text layer", spans=[]),
     ]
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -219,6 +228,9 @@ def test_rag_pipeline_retries_only_fields_missing_a_value_not_low_confidence_one
     monkeypatch.setattr(pipeline, "_SINGLE_CALL_MAX_CHARS", 0)  # force the per-section path (single-call skips retry)
     fake_pages = [SimpleNamespace(page_number=0, text="page one text, long enough to count as a real text layer", spans=[])]
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -277,6 +289,9 @@ def test_retry_pass_batches_every_missing_field_in_a_section_into_one_call(monke
     long_text = "page one text. " * 1000
     fake_pages = [SimpleNamespace(page_number=0, text=long_text, spans=[])]
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -335,6 +350,9 @@ def test_short_document_uses_a_single_extraction_call_for_every_section(monkeypa
     per-field retry pass skipped entirely (see pipeline._SINGLE_CALL_MAX_CHARS)."""
     fake_pages = [SimpleNamespace(page_number=0, text="short page text, long enough to count as a real text layer", spans=[])]
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: len(fake_pages))
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: fake_pages)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("completed_application_form", 0.9))
 
@@ -419,10 +437,15 @@ def test_english_image_falls_back_to_vision_when_rapidocr_fails(monkeypatch):
         lambda data: (_ for _ in ()).throw(local_ocr.LocalOcrError("rapidocr not installed")),
     )
     monkeypatch.setattr(classifier, "classify_image", lambda data, media_type: ("legal_proof", 0.6))
+    # The vision path reads the image through _lab_report_fields' combined
+    # call now, not extract_fields_vision; schema slots come back in
+    # "schema_fields" of that one reply rather than from a separate pass.
     monkeypatch.setattr(
-        extractor,
-        "extract_fields_vision",
-        lambda doc_type, data, media_type: [{"field": "organisation.laboratory_name", "value": "Acme Labs", "confidence": 0.6}],
+        pipeline.combined_extraction, "extract",
+        lambda chain, payload, schema_field_paths=None: {
+            "fields": {}, "tests": [],
+            "schema_fields": {"organisation.laboratory_name": "Acme Labs"},
+        },
     )
 
     fake_ocr = SimpleNamespace(extract=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call deepreef-ocr for english")))
@@ -458,12 +481,16 @@ def test_doc_type_other_gets_fields_and_table_rows_via_unified_extraction(monkey
     fake_page = SimpleNamespace(
         page_number=0, text="Cane Sugar: Absent", spans=[("Cane Sugar: Absent", Rect(x=0, y=0, w=1, h=1))],
     )
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("other", 0.4))
-    monkeypatch.setattr(pipeline.unified_extraction, "extract", lambda chain, payload: {
+    monkeypatch.setattr(pipeline.combined_extraction, "extract", lambda chain, payload, schema_field_paths=None: {
         "fields": {"cane_sugar": "Absent"},
         "tests": [{"test_name": "Milk Fat", "result": "3.72", "unit": "%", "reference_range": "Min. 3.20"}],
+        "schema_fields": {},
     })
 
     result = process_document(b"%PDF-fake", "lab-report.pdf", "application/pdf", script="english")
@@ -484,15 +511,23 @@ def test_recognized_doc_type_keeps_schema_fields_and_gains_unified_ones(monkeypa
     named NABL form slot) AND gets the shared pass on top, so a value with no
     schema slot is no longer discarded."""
     fake_page = SimpleNamespace(page_number=0, text="GST Number: 27ABCDE1234F1Z5. Patient: Gunu.", spans=[])
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
+    # One combined call now carries both: the named NABL slots come back in
+    # "schema_fields" (source="llm") and everything with no slot in "fields"
+    # (source="open_extraction"). There is no separate extract_fields pass to
+    # stub any more, which is exactly what this test still pins down.
     monkeypatch.setattr(
-        extractor, "extract_fields",
-        lambda doc_type, text: [{"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}],
+        pipeline.combined_extraction, "extract",
+        lambda chain, payload, schema_field_paths=None: {
+            "fields": {"patient_name": "Gunu"}, "tests": [],
+            "schema_fields": {"organisation.gst_number": "27ABCDE1234F1Z5"},
+        },
     )
-    monkeypatch.setattr(pipeline.unified_extraction, "extract",
-                         lambda chain, payload: {"fields": {"patient_name": "Gunu"}, "tests": []})
 
     result = process_document(b"%PDF-fake", "cert.pdf", "application/pdf", script="english")
 
@@ -501,23 +536,47 @@ def test_recognized_doc_type_keeps_schema_fields_and_gains_unified_ones(monkeypa
     assert by_field["patient_name"].source == "open_extraction"
 
 
-def test_unified_extraction_failure_keeps_the_schema_guided_fields(monkeypatch):
-    """Every provider rate-limited on the shared call must not discard the
-    schema-guided fields already extracted, or lose the document."""
+def test_combined_extraction_failure_is_recorded_and_does_not_lose_the_document(monkeypatch):
+    """A failed extraction call must surface as a warning, not as a document
+    that quietly reports zero fields and no error.
+
+    NOTE — this test used to assert that the schema-guided fields SURVIVED an
+    open-ended failure, because the two were separate LLM calls. They are one
+    combined call now (schema slots ride in "schema_fields" of the same
+    reply), so that call failing loses BOTH kinds at once where it used to
+    lose only the open ones. That is a real reduction in resilience and the
+    reason one timeout can empty a document.
+
+    What still survives is the rule-based identifier pass, which reads the
+    page text directly and spends no LLM call — so a totally rate-limited run
+    is degraded rather than empty. The assertions below pin both halves of
+    that: what is lost, and what is not."""
     fake_page = SimpleNamespace(page_number=0, text="GST Number: 27ABCDE1234F1Z5", spans=[])
+    # The live _process_pdf gates on has_text_layer() before it reads
+    # pages, so leaving it unpatched sends the fake bytes to pymupdf.
+    monkeypatch.setattr(pdf_utils, "has_text_layer", lambda data: True)
     monkeypatch.setattr(pdf_utils, "extract_text_and_boxes", lambda data: [fake_page])
     monkeypatch.setattr(pdf_utils, "page_count", lambda data: 1)
     monkeypatch.setattr(classifier, "classify_text", lambda text: ("legal_proof", 0.9))
-    monkeypatch.setattr(extractor, "extract_fields", lambda doc_type, text: [
-        {"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.9}
-    ])
-    monkeypatch.setattr(pipeline.unified_extraction, "build_payload",
-                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("every provider failed")))
+    monkeypatch.setattr(
+        pipeline.combined_extraction, "extract",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("every provider failed")),
+    )
 
     result = process_document(b"%PDF-fake", "cert.pdf", "application/pdf", script="english")
 
-    assert [f.field for f in result.fields] == ["organisation.gst_number"]
-    assert any("open-ended" in w for w in result.extraction_warnings)
+    # The document survives the failure rather than raising out of the pipeline.
+    assert result.doc_type == "legal_proof"
+    # And the failure is visible: without this a rate-limited run is
+    # indistinguishable from a document that genuinely had nothing in it.
+    assert any("could not be extracted" in w for w in result.extraction_warnings)
+    # Nothing the failed LLM call would have produced is present: neither the
+    # schema slot nor the open-ended value, because both rode on that call.
+    assert "organisation.gst_number" not in {f.field for f in result.fields}
+    assert "patient_name" not in {f.field for f in result.fields}
+    # But the no-LLM identifier pass still fired, so the document is degraded
+    # rather than empty.
+    assert [f.field for f in result.fields] == ["cin"]
 
 
 def test_extract_open_fields_chunked_covers_every_chunk_not_just_the_first(monkeypatch):

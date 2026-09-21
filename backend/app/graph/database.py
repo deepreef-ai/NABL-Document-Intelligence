@@ -63,6 +63,16 @@ class GraphRun(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     document_id = Column(String(128), nullable=False, index=True)
     thread_id = Column(String(128), nullable=False, unique=True, index=True)
+    # Which NABL application this run belongs to, when it was started from
+    # one. Nullable on purpose: the graph is usable standalone (scripts, the
+    # Graph Extraction screen with no application in hand), and a run without
+    # an application is not an error.
+    #
+    # Before this existed there was NO link of any kind between a graph run
+    # and an application — the compiled-form endpoint filters documents by
+    # application_id and queries a different database entirely, so graph
+    # output could never reach it however good that output was.
+    application_id = Column(String(128), default="", index=True)
 
     file_name = Column(String(512), default="")
     file_path = Column(Text, default="")
@@ -223,8 +233,38 @@ def get_engine():
     return _engine
 
 
+# Columns added after the first release. create_all() creates missing
+# TABLES but never alters an existing one, so a database written before a
+# column existed would keep failing every query that mentions it. Applied
+# idempotently at startup rather than through a migration tool, matching how
+# the rest of this store is managed — see the module docstring.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("graph_runs", "application_id", "VARCHAR(128) DEFAULT ''"),
+)
+
+
+def _apply_added_columns(engine) -> None:
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    for table, column, ddl in _ADDED_COLUMNS:
+        if table not in existing_tables:
+            continue  # create_all just made it, with the column already on it
+        if column in {c["name"] for c in inspector.get_columns(table)}:
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+            log.info("graph db: added column %s.%s", table, column)
+        except Exception:  # noqa: BLE001 — a read-only or racing process must not crash startup
+            log.warning("graph db: could not add column %s.%s", table, column, exc_info=True)
+
+
 def init_db() -> None:
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    _apply_added_columns(engine)
 
 
 @contextmanager
@@ -272,6 +312,9 @@ def save_run(state, result) -> int:
             run = GraphRun(document_id=state.document_id, thread_id=state.document_id)
             s.add(run)
 
+        # getattr: a state built before this field existed (a resumed run
+        # from an older checkpoint) simply has no application to record.
+        run.application_id = getattr(state, "application_id", "") or ""
         run.file_name = state.file_name
         run.file_path = state.file_path
         run.file_type = state.file_type
@@ -411,3 +454,64 @@ def list_runs(limit: int = 50, status: str | None = None) -> list[dict]:
             }
             for r in q.limit(limit).all()
         ]
+
+
+def readings_for_application(application_id: str) -> list[dict]:
+    """Every graph run started from one NABL application, with its fields.
+
+    Exists so the compiled-form endpoint can show graph output WITHOUT
+    merging it into the legacy pipeline's own fields. The two speak different
+    shapes — a graph field carries evidence status, a confidence score, a
+    normalized name and the exact source span it was read from; a legacy
+    extracted field does not — so flattening them together would lose exactly
+    the part that makes graph output worth reading, and would present two
+    different provenance guarantees as if they were one.
+
+    Returns [] when nothing links: a graph run started outside an application
+    (a script, or the Graph Extraction screen used standalone) has no
+    application_id and belongs to no form.
+    """
+    if not application_id:
+        return []
+    init_db()
+    with session_scope() as s:
+        runs = (
+            s.query(GraphRun)
+            .filter(GraphRun.application_id == application_id)
+            .order_by(GraphRun.created_at.desc())
+            .all()
+        )
+        out = []
+        for run in runs:
+            fields = (
+                s.query(GraphField)
+                .filter(GraphField.run_id == run.id)
+                .order_by(GraphField.page_number, GraphField.occurrence_index)
+                .all()
+            )
+            out.append({
+                "document_id": run.document_id,
+                "file_name": run.file_name,
+                "document_type": run.document_type,
+                "final_status": run.final_status,
+                "total_pages": run.total_pages,
+                "ocr_pages": run.ocr_pages,
+                "llm_call_count": run.llm_call_count,
+                "processing_time_seconds": run.processing_time_seconds,
+                "created_at": run.created_at.isoformat() if run.created_at else None,
+                "fields": [
+                    {
+                        "field_name": f.field_name,
+                        "normalized_field_name": f.normalized_field_name,
+                        "value": f.value,
+                        "data_type": f.data_type,
+                        "page_number": f.page_number,
+                        "section_name": f.section_name,
+                        "confidence_score": f.confidence_score,
+                        "evidence_status": f.evidence_status,
+                        "exact_source_evidence": f.exact_source_evidence,
+                    }
+                    for f in fields
+                ],
+            })
+        return out

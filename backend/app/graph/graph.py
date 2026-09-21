@@ -36,6 +36,7 @@ replayed checkpoint takes the same path it took the first time.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import sqlite3
@@ -258,6 +259,22 @@ def build_checkpointer(path: str | None = None):
 # --------------------------------------------------------------------------
 
 
+def _timed(name: str, fn):
+    """Wrap a node so its duration is logged.
+
+    Applied once here rather than editing nineteen node functions: the node
+    signature is LangGraph's, the wrapper is transparent, and a stage that
+    raises still reports its duration before the exception propagates.
+    """
+    from app.observability import stage
+
+    @functools.wraps(fn)
+    def wrapper(state):
+        with stage(name):
+            return fn(state)
+
+    return wrapper
+
 def build_graph(checkpointer=None, *, interrupt_before_human: bool | None = None):
     """Compile the workflow.
 
@@ -267,25 +284,25 @@ def build_graph(checkpointer=None, *, interrupt_before_human: bool | None = None
     settings = get_graph_settings()
     builder = StateGraph(GraphState)
 
-    builder.add_node("start", start_run)
-    builder.add_node("document_validation", validate_document)
-    builder.add_node("preprocessing", preprocess_document)
-    builder.add_node("document_analysis", analyse_document)
-    builder.add_node("chunk_management", create_chunks)
-    builder.add_node("dynamic_extraction", extract_fields)
-    builder.add_node("response_validation", validate_responses)
-    builder.add_node("retry_recovery", recover)
-    builder.add_node("evidence_validation", validate_evidence)
-    builder.add_node("field_normalization", normalize_and_merge)
-    builder.add_node("conflict_resolution", detect_and_resolve_conflicts)
-    builder.add_node("completeness_check", check_completeness)
-    builder.add_node("targeted_reanalysis", mark_reanalysis_targets)
-    builder.add_node("form_mapping", map_to_form)
-    builder.add_node("form_filling", fill_form)
-    builder.add_node("human_review", human_review_gate)
-    builder.add_node("quality_control", run_quality_control)
-    builder.add_node("final_decision", decide)
-    builder.add_node("persistence", persist)
+    builder.add_node("start", _timed("start", start_run))
+    builder.add_node("document_validation", _timed("document_validation", validate_document))
+    builder.add_node("preprocessing", _timed("preprocessing", preprocess_document))
+    builder.add_node("document_analysis", _timed("document_analysis", analyse_document))
+    builder.add_node("chunk_management", _timed("chunk_management", create_chunks))
+    builder.add_node("dynamic_extraction", _timed("dynamic_extraction", extract_fields))
+    builder.add_node("response_validation", _timed("response_validation", validate_responses))
+    builder.add_node("retry_recovery", _timed("retry_recovery", recover))
+    builder.add_node("evidence_validation", _timed("evidence_validation", validate_evidence))
+    builder.add_node("field_normalization", _timed("field_normalization", normalize_and_merge))
+    builder.add_node("conflict_resolution", _timed("conflict_resolution", detect_and_resolve_conflicts))
+    builder.add_node("completeness_check", _timed("completeness_check", check_completeness))
+    builder.add_node("targeted_reanalysis", _timed("targeted_reanalysis", mark_reanalysis_targets))
+    builder.add_node("form_mapping", _timed("form_mapping", map_to_form))
+    builder.add_node("form_filling", _timed("form_filling", fill_form))
+    builder.add_node("human_review", _timed("human_review", human_review_gate))
+    builder.add_node("quality_control", _timed("quality_control", run_quality_control))
+    builder.add_node("final_decision", _timed("final_decision", decide))
+    builder.add_node("persistence", _timed("persistence", persist))
 
     builder.add_edge(START, "start")
     builder.add_edge("start", "document_validation")

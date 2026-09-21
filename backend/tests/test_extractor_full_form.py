@@ -4,7 +4,7 @@ from app.documents.extractor import (
     _filter_to_requested_indexed_fields,
     _flatten_schema,
     normalize_llm_fields,
-    _renumber_chunk_fields,
+    renumber_chunk_fields,
     extract_full_form_fields_chunked,
     extract_section_fields,
 )
@@ -89,14 +89,14 @@ def test_renumber_chunk_fields_offsets_each_chunk_against_a_running_total():
         {"field": "equipment[1].name", "value": "Balance", "confidence": 0.9},
         {"field": "organisation.gst_number", "value": "27ABCDE1234F1Z5", "confidence": 0.95},
     ]
-    result1 = _renumber_chunk_fields(chunk1, offsets)
+    result1 = renumber_chunk_fields(chunk1, offsets)
     assert [f["field"] for f in result1] == ["equipment[0].name", "equipment[1].name", "organisation.gst_number"]
     assert offsets == {"equipment": 2}
 
     # Chunk 2 independently starts counting from 0 again — must be remapped
     # to continue globally from where chunk 1 left off (index 2), not collide.
     chunk2 = [{"field": "equipment[0].name", "value": "Centrifuge", "confidence": 0.85}]
-    result2 = _renumber_chunk_fields(chunk2, offsets)
+    result2 = renumber_chunk_fields(chunk2, offsets)
     assert result2 == [{"field": "equipment[2].name", "value": "Centrifuge", "confidence": 0.85}]
     assert offsets == {"equipment": 3}
 

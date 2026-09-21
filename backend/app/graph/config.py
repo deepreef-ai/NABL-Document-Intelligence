@@ -63,7 +63,17 @@ class GraphSettings(BaseSettings):
     #: this layer's own attempts. Real provider cooldowns after a 429 run
     #: well past a minute (MEASURED: 78s and 158s), so a 60s ceiling meant
     #: giving up on a chunk that would have succeeded a moment later.
-    max_cooldown_wait_seconds: float = 240.0
+    #:
+    #: MUST stay >= llm.chain._BACKOFF_CAP_SECONDS (300s), which is the
+    #: largest cooldown the chain can impose on itself. At 240s there was a
+    #: dead zone: a provider backed off to 287s/297s (MEASURED, graph run
+    #: 137) — under the 300s cap it sets, but over the 240s this layer would
+    #: wait — so the call gave up instantly instead of waiting out a cooldown
+    #: that was about to clear. Both chunks of a 17-page PDF were abandoned
+    #: that way, with all 17 pages read: the data loss was here, not in page
+    #: coverage. Waiting is also the only safe response to throttling, since
+    #: the alternative — more concurrency — makes the throttling worse.
+    max_cooldown_wait_seconds: float = 310.0
     max_requests_per_minute: int = 60
     max_concurrent_llm_calls: int = 4
 

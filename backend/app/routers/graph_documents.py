@@ -100,9 +100,11 @@ def _save_upload(upload: UploadFile, document_id: str) -> str:
     return path
 
 
-def _process(path: str, document_id: str, form_id: str, schema: dict | None) -> None:
+def _process(path: str, document_id: str, form_id: str, schema: dict | None,
+             application_id: str = "") -> None:
     try:
-        run_document(path, document_id=document_id, form_id=form_id, target_form_schema=schema)
+        run_document(path, document_id=document_id, form_id=form_id,
+                     target_form_schema=schema, application_id=application_id)
     except Exception:  # noqa: BLE001 — a background task must never die silently
         log.exception("graph: background processing failed for %s", document_id)
 
@@ -118,6 +120,13 @@ async def submit_document(
     file: UploadFile = File(..., description="PDF, DOCX or image"),
     form_id: str = Form("", description="target form id, e.g. NABL_151"),
     target_form_schema: str = Form("", description="optional inline JSON form schema"),
+    application_id: str = Form(
+        "",
+        description="optional NABL application this run belongs to. Supplying it is what lets "
+                    "the compiled-form preview show this run's readings under "
+                    "agentic_extraction_results; "
+                    "without it the run is standalone and belongs to no form.",
+    ),
 ) -> SubmitResponse:
     """Accept a document and start processing it in the background."""
     import json
@@ -133,7 +142,7 @@ async def submit_document(
             raise HTTPException(status_code=400,
                                 detail=f"target_form_schema is not valid JSON: {exc}") from exc
 
-    background.add_task(_process, path, document_id, form_id, schema)
+    background.add_task(_process, path, document_id, form_id, schema, application_id)
     return SubmitResponse(
         document_id=document_id,
         poll=f"/graph/documents/{document_id}/status",

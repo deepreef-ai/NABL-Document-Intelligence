@@ -1,0 +1,109 @@
+# Lab-report anonymiser configuration.
+#
+# Every key is optional — omitted keys keep their default. Copy this file,
+# edit it, and pass it with --config.
+#
+#     python scripts/anonymization/anonymize_lab_reports.py \
+#         -i "G:/Shared drives/.../lab_reports" \
+#         -o "D:/anonymised/lab_reports" \
+#         -c scripts/anonymization/anonymizer.example.yaml
+
+detection:
+  # --- self-validating identifiers: shape PLUS a checksum or structure rule
+  aadhaar: true
+  pan: true
+  email: true
+  phone: true
+  passport: true
+  voter_id: true
+  driving_licence: true
+  ifsc: true
+  # GSTIN identifies the LABORATORY, not a patient. Leaving it on will redact
+  # the lab's own registration from its own letterhead.
+  gstin: false
+
+  # --- context-driven: a label such as "Patient Name:" and the value after it
+  patient_name: true
+  doctor_name: true
+  address: true
+  date_of_birth: true
+  patient_ids: true
+  # Age and sex are usually clinically meaningful and only weakly identifying.
+  # Turn on if your release policy requires it.
+  age_sex: false
+
+  # Requiring the Verhoeff checksum is what stops 12-digit specimen and
+  # accession numbers being redacted as if they were Aadhaar numbers. Turning
+  # it off catches more real Aadhaars and destroys far more laboratory data.
+  aadhaar_require_checksum: true
+
+  # How far past a label a value may extend, in tokens.
+  max_value_tokens_name: 5
+  max_value_tokens_address: 25
+
+redaction:
+  # black_box  — cover and delete, leaving a plain filled rectangle
+  # label      — cover and delete, stamping "[PATIENT_NAME]" in the gap
+  # pseudonym  — cover and delete, stamping a stable synthetic value
+  mode: label
+
+  box_colour: [0.0, 0.0, 0.0]
+  label_colour: [1.0, 1.0, 1.0]
+
+  # Boxes are grown by this many units before redacting. OCR boxes sit tight
+  # against the ink, and a flush box can leave a readable sliver.
+  padding_px: 1.5
+
+  # Resolution used when a scanned page is rebuilt. Higher keeps the report
+  # legible and grows the output file.
+  raster_dpi: 200
+
+  # Only used in pseudonym mode. A fixed salt makes the same person map to the
+  # same pseudonym across runs, which preserves longitudinal structure — and
+  # makes the mapping reversible by anyone holding the salt. Treat it as a
+  # secret, or leave empty to break linkage deliberately.
+  pseudonym_salt: ""
+
+ocr:
+  enabled: true
+  # A page with less extractable text than this is treated as scanned.
+  min_page_text_chars: 20
+  dpi: 200
+  # Pages read below this confidence are flagged in the report: a poor read is
+  # also a likely MISS, and the operator should look at those by hand.
+  low_confidence: 0.55
+
+verification:
+  enabled: true
+  # Cheap. Catches a box drawn over text that is still selectable underneath.
+  check_text_layer: true
+  # Expensive, and the only way to catch PII that was never detected at all.
+  check_ocr: true
+  # Only these kinds can mark a document FAILED_REVIEW. Context-driven
+  # detections are too noisy to gate on — a verification step that fails every
+  # document teaches its operator to ignore it.
+  failing_kinds:
+    - AADHAAR
+    - PAN
+    - EMAIL
+    - PHONE
+    - PASSPORT
+    - VOTER_ID
+    - DRIVING_LICENCE
+    - IFSC
+
+# Writing truncated PII samples into the reports helps tune rules — and makes
+# the report files themselves sensitive. Off unless you need it.
+include_pii_samples: false
+
+# Site-specific vocabulary that must never be redacted. Add your own analyte
+# names, method codes and column headings here.
+extra_protected_terms:
+  - "Vitamin D3"
+  - "25-OH Vitamin D"
+  - "IFSH/SOP/C/TE/008"
+
+# Site-specific labels that introduce a patient name on your report templates.
+extra_patient_labels:
+  - "name of the subject"
+  - "donor name"
