@@ -422,4 +422,5 @@ def run_graph_pipeline(
         # analyte arrived as a scalar with its unit and range fused in.
         tests=[t for t in result.structured_document.get("tests", []) if t],
         structured=result.structured_document,
+        overall_status=result.overall_status.value,
     )

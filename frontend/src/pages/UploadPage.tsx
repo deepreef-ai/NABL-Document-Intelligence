@@ -196,7 +196,7 @@ export default function UploadPage() {
     );
   }
 
-  const anyExtracted = documents.some((d) => d.status === "extracted");
+  const anyExtracted = documents.some((d) => d.status === "extracted" || d.status === "needs_review");
 
   return (
     <div className="page upload-page">
@@ -239,7 +239,7 @@ export default function UploadPage() {
             <li key={d.id} className={`document-status-${status}`}>
               <strong>{d.filename}</strong> — {status}
               {pages != null && <span> · {pages} page{pages === 1 ? "" : "s"}</span>}
-              {fields != null && status === "extracted" && (
+              {fields != null && (status === "extracted" || status === "needs_review") && (
                 <span> · {fields} field{fields === 1 ? "" : "s"}</span>
               )}
               {d.doc_type && <span> · {d.doc_type}</span>}
