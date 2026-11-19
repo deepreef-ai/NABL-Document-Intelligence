@@ -206,6 +206,10 @@ class Settings(BaseSettings):
     # server happened to be started.
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    # Optional API key (env API_KEY). Empty/unset = auth disabled, exactly as
+    # before. When set, all routes except health/docs need an X-API-Key header.
+    api_key: str = ""
+
 
     @field_validator("log_level")
     @classmethod

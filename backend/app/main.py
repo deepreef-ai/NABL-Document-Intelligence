@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.auth import api_key_middleware
 from app.config import get_settings
 from app.db import init_db
 from app.llm.base import LlmNotConfigured, LlmProviderError
@@ -16,6 +17,10 @@ settings = get_settings()
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="NABL Document Intelligence")
+
+# Optional API key (no-op unless API_KEY is set). Added BEFORE CORS so CORS is
+# the outermost layer and a 401 still carries CORS headers.
+app.middleware("http")(api_key_middleware)
 
 app.add_middleware(
     CORSMiddleware,
