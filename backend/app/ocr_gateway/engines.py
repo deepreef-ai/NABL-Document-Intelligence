@@ -135,9 +135,31 @@ def _load_deepreef(s: GatewaySettings) -> dict[str, Any]:
         return _deepreef
 
 
+def _english_vendored(image_bytes: bytes, s: GatewaySettings) -> EngineResult:
+    """Script en from the in-repo replica (english_engine): no external checkout."""
+    from app.ocr_gateway import english_engine
+
+    try:
+        img, meta = english_engine.decode(image_bytes, s.max_dim)
+    except Exception as exc:  # noqa: BLE001
+        raise EngineError(f"could not decode image: {exc}") from exc
+    try:
+        out = english_engine.extract(img, drop_camera_stamps=not s.keep_dated_lines)
+    except Exception as exc:  # noqa: BLE001
+        raise EngineError(f"vendored English OCR failed: {exc}") from exc
+    return _from_deepreef(out, meta, "deepreef_local")
+
+
 def deepreef_local(image_bytes: bytes, code: str, s: GatewaySettings) -> EngineResult:
+    """English uses the vendored model when its files are present; every other
+    script (or a missing vendored model) uses the external deepreef checkout."""
     if not image_bytes:
         raise EngineError("empty image")
+    if code == "en":
+        from app.ocr_gateway import english_engine
+
+        if english_engine.available():
+            return _english_vendored(image_bytes, s)
     dr = _load_deepreef(s)
     try:
         img, meta = dr["decode"](image_bytes, max_dim=s.max_dim)

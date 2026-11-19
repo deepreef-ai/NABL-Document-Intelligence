@@ -4,7 +4,10 @@ Why this exists:
 - The legacy path (documents/local_ocr.py) runs RapidOCR's bundled default
   model, which glues words together ("DIAGNOSTICREPORT", "25/08/202110:04").
 - deepreef-ocr's ``en`` script (PP-OCRv5 Devanagari model, which reads all
-  ASCII) keeps word spacing, so it is the preferred English engine.
+  ASCII) keeps word spacing, so it is the preferred English engine. That
+  model and deepreef's preprocessor are vendored in this repo
+  (english_engine.py, models/english/, vendor/), so English needs no
+  external deepreef-ocr checkout; other scripts still use it.
 - deepreef's camera-stamp filter drops every line containing a dd/mm/yyyy
   date. Lab reports are full of dates, so the filter is disabled in-process
   (env vars before import + module attributes; deepreef's files are untouched).
@@ -105,6 +108,14 @@ def self_check() -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         report["deepreef_local"]["detail"] = f"{type(exc).__name__}: {exc}"
+    # Script en runs from the vendored model; deepreef_local.ok above is the
+    # external checkout (other scripts / fallback when the vendored files are gone).
+    try:
+        from app.ocr_gateway import english_engine
+
+        report["english_vendored"] = english_engine.status()
+    except Exception as exc:  # noqa: BLE001
+        report["english_vendored"] = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
     try:
         s = get_gateway_settings()
         fn = s.lambda_function
