@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.db import get_db
+from app.upload_validation import read_validated_upload
 from app.documents import pdf_utils
 from app.documents.pipeline import process_document
 from app.documents.storage import LocalFileStorage
@@ -138,7 +139,7 @@ async def upload_document(
     if application.status not in UNLOCKED_STATUSES:
         raise HTTPException(409, "eligibility prerequisites are not all satisfied yet")
 
-    data = await file.read()
+    data = await read_validated_upload(file)
     key = storage.put(data, file.filename or "upload")
     document = Document(
         application_id=application_id,

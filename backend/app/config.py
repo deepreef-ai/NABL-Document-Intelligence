@@ -195,6 +195,10 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./nabl.db"
     storage_dir: str = "./storage"
+    # Upload guard for POST /applications/{id}/documents. Env: MAX_UPLOAD_MB,
+    # ALLOWED_UPLOAD_EXTENSIONS (comma-separated, with dots).
+    max_upload_mb: int = 50
+    allowed_upload_extensions: str = ".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.gif,.docx"
 
     # Fields at or above this score are shown as confirmed; below it they are
     # flagged yellow/red for mandatory human review, per the HITL spec.
