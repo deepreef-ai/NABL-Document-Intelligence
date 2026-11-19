@@ -18,3 +18,13 @@ backend/graph_storage/checkpoints.db
 backend/graph_storage/checkpoints.db.backup
 backend/.env*
 !.env.example
+
+# runtime data (never commit; contains uploaded documents / generated state)
+backend/graph_storage/*
+!backend/graph_storage/demo/
+backend/qdrant_storage/
+backend/benchmark_output/
+backend/benchmark_api_results/
+backend/scripts/benchmark_api_results/
+*.db-shm
+*.db-wal
