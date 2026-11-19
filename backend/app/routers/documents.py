@@ -58,7 +58,17 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
     document.doc_type = result.doc_type
     document.extraction_source = result.extraction_source
     document.page_count = result.page_count
-    document.status = "extracted"
+    # Honest status: the graph's verdict decides, not the mere fact that it
+    # returned. REJECTED (or INCOMPLETE with nothing extracted) is a failure;
+    # anything else short of VALIDATED needs a person. Fields are stored in
+    # every case, so a failure on one field never discards the valid ones.
+    verdict = getattr(result, "overall_status", "") or ""
+    if verdict == "REJECTED" or (verdict == "INCOMPLETE" and not result.fields):
+        document.status = "failed"
+    elif verdict and verdict != "VALIDATED":
+        document.status = "needs_review"
+    else:
+        document.status = "extracted"
     # Non-fatal: some section/chunk of a whole-form extraction couldn't be
     # completed (e.g. every LLM provider was rate-limited at that moment)
     # while the rest succeeded — see documents/pipeline.py's
@@ -178,7 +188,7 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict:
     every two seconds while the client is only asking "is it done yet?".
 
     ``status`` is the same value the pipeline already writes:
-    processing -> extracted | failed.
+    processing -> extracted | needs_review | failed.
     """
     document = _get_document(db, document_id)
     return {
@@ -191,7 +201,7 @@ def document_status(document_id: str, db: Session = Depends(get_db)) -> dict:
         # could not be completed) - so a client must not treat it as fatal
         # on its own; `status` is what decides.
         "error": document.error,
-        "done": document.status in ("extracted", "failed"),
+        "done": document.status in ("extracted", "needs_review", "failed"),
     }
 
 

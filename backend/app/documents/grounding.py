@@ -62,6 +62,10 @@ class PipelineResult:
     # The whole document in the gold dataset's shape (document_info, lab_info,
     # ..., tests[]), ready to diff against a labelled record.
     structured: dict = field(default_factory=dict)
+    # The graph's FinalStatus value ("VALIDATED", "REJECTED", ...). Empty for the
+    # legacy extraction paths, which have no verdict; the router treats that as
+    # a clean success, exactly as before.
+    overall_status: str = ""
 
 
 def ground(value: str, candidates: list[tuple[str, Rect]]) -> Rect | None:

@@ -85,7 +85,7 @@ export default function ReviewPage() {
     const [docs, form] = await Promise.all([listDocuments(applicationId), getCompiledForm(applicationId)]);
     setDocuments(docs);
     setCompiled(form);
-    setSelectedId((current) => current ?? docs.find((d) => d.status === "extracted")?.id ?? docs[0]?.id ?? null);
+    setSelectedId((current) => current ?? docs.find((d) => (d.status === "extracted" || d.status === "needs_review"))?.id ?? docs[0]?.id ?? null);
   }
 
   useEffect(() => {

@@ -55,7 +55,7 @@ class Document(Base):
     structured_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Result-table rows, one dict per analyte, columns kept separate.
     tests_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    # "uploaded" -> "processing" -> "extracted" -> "failed"
+    # "uploaded" -> "processing" -> "extracted" | "needs_review" | "failed"
     status: Mapped[str] = mapped_column(String, default="uploaded")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

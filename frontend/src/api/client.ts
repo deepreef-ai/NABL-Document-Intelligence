@@ -95,7 +95,7 @@ export interface DocumentOut {
   // page cap any more, so this is what confirms a long scan was read end to
   // end rather than truncated.
   page_count: number | null;
-  status: "uploaded" | "processing" | "extracted" | "failed";
+  status: "uploaded" | "processing" | "extracted" | "needs_review" | "failed";
   error: string | null;
   /**
    * Result-table rows with their columns intact. A results table is not a
