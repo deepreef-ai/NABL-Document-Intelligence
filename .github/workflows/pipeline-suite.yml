@@ -1,0 +1,31 @@
+name: pipeline-suite
+
+on:
+  pull_request:
+    paths: ["backend/**"]
+
+jobs:
+  test-lock:
+    # Cheap and first: a PR that edits locked tests fails here in seconds.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python backend/scripts/test_lock.py --verify
+
+  suite-fast:
+    needs: test-lock
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - name: Install (Docling is optional and currently conflicts with the httpx pin)
+        run: |
+          grep -v '^docling' requirements.txt > /tmp/req.txt
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/req.txt
+      - run: python scripts/run_suite.py
+      - if: always()
+        run: cat test-reports/suite_summary.md >> "$GITHUB_STEP_SUMMARY"
