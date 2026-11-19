@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, err, normalise_for_match, truncate
+from app.graph.nodes.helpers import audit, err, normalise_for_match, strict_value_key, truncate
 from app.graph.prompts import CONFLICT_SYSTEM, conflict_user
 from app.graph.schemas import (
     ConflictCandidate,
@@ -117,7 +117,7 @@ def detect_and_resolve_conflicts(state: GraphState) -> dict:
         with_values = [f for f in group if f.value is not None]
         if len(with_values) < 2:
             continue
-        distinct = {normalise_for_match(f.normalized_value or f.value) for f in with_values}
+        distinct = {strict_value_key(f.normalized_value or f.value) for f in with_values}
         if len(distinct) < 2:
             continue
         if _is_repeating_entity(with_values):

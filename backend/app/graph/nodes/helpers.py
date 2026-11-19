@@ -21,6 +21,7 @@ import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
+from app.documents.value_matching import strict_value_key as _strict_value_key
 from app.graph.errors import ErrorType, make_error
 from app.graph.schemas import AuditEntry, ExtractedField, ProcessingErrorRecord
 
@@ -93,6 +94,12 @@ def normalise_for_match(value: Any) -> str:
     "40-129", "IN 123" vs "IN123") and that is not a real difference in value.
     """
     return _NON_ALNUM.sub("", clean_text(value).lower())
+
+
+def strict_value_key(value: Any) -> str:
+    """`normalise_for_match` for VALUES: numbers keep their decimal point, sign
+    and comparator, so "1.5" and "0.15" (or "5" and "-5") are not "the same"."""
+    return _strict_value_key(clean_text(value))
 
 
 def similarity(a: Any, b: Any) -> float:

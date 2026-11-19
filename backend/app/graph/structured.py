@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.graph.nodes.helpers import clean_text, normalise_for_match
+from app.graph.nodes.helpers import clean_text, normalise_for_match, strict_value_key
 from app.graph.schemas import EvidenceStatus, ExtractedField, ExtractionStatus, TestRow
 
 #: Section order as it appears in the gold records. MEASURED across the 53
@@ -161,7 +161,7 @@ def build_structured(
         # form and the compiled application form use; it just is not what
         # "the extraction" means when you diff it against ground truth.
         value = f.value if f.value is not None else f.normalized_value
-        key = normalise_for_match(value)
+        key = strict_value_key(value)
         bucket = seen.setdefault(name, {})
         if key in bucket:
             # Same fact restated — record the extra page, do not duplicate.
@@ -221,7 +221,7 @@ def _dedupe_tests(tests: list[TestRow]) -> list[TestRow]:
     for t in tests:
         key = (
             normalise_for_match(t.test_name),
-            normalise_for_match(t.result),
+            strict_value_key(t.result),
             normalise_for_match(t.unit),
             normalise_for_match(t.sample_date),
             normalise_for_match(t.panel_name),

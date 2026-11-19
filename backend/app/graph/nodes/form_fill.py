@@ -27,7 +27,7 @@ import logging
 from typing import Any
 
 from app.graph.errors import ErrorType
-from app.graph.nodes.helpers import audit, err, is_placeholder, normalise_for_match
+from app.graph.nodes.helpers import audit, err, is_placeholder, normalise_for_match, strict_value_key
 from app.graph.schemas import ManualReviewItem, MappingStatus
 from app.graph.state import GraphState
 
@@ -165,7 +165,7 @@ def fill_form(state: GraphState) -> dict:
         # Repeating targets are exempt: several equipment rows legitimately
         # carry different values into equipment[0], equipment[1], and those
         # come from different source fields anyway.
-        value_key = normalise_for_match(m.mapped_value)
+        value_key = strict_value_key(m.mapped_value)
         if value_key and not repeating:
             already = claimed_by.get(value_key)
             if already is not None and already != target:
