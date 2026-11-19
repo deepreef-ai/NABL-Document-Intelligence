@@ -4,7 +4,7 @@
     "scripts/test_lock.py": "8baf3afc57f8ec0499268cb54a65932ab22a68be3e1bee8bfcf054feaa941694",
     "tests/suite/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "tests/suite/_support.py": "a0e1ec9190052d3a3a7eac19005fd1749cee9cc4b5861567f48ea47668548935",
-    "tests/suite/conftest.py": "96b28c881aaadc4437bfeb761171868a78d1b129c8250622544c1f0b9b3a075d",
+    "tests/suite/conftest.py": "46e3c0994fcb5b0dcc401e52be5e2867322d118d1e0fd9b8b46d5e667feb7b29",
     "tests/suite/test_flow.py": "1517af8c6fba5450535da7f9fe581c5a2a928558100d79b801d05ad92fbb7d66",
     "tests/suite/test_gateway.py": "51ad4fd10274a2ac8767ac9b9e27d4f86767b5945c446708e31e6382b4aa70f8",
     "tests/suite/test_ocr_quality.py": "495a121e93cd73f37976f07632df2ce94e4c20beb072bf68f62eb7ca575f1bd9",
@@ -36,6 +36,15 @@
         "tests/suite/test_lambda.py"
       ],
       "reason": "Lambda (deepreef-ocr) routing tests: new file, no locked file changed",
+      "approver": "pending senior review"
+    },
+    {
+      "when": "2026-11-19T08:12:03+00:00",
+      "action": "relock",
+      "files": [
+        "tests/suite/conftest.py"
+      ],
+      "reason": "Test isolation bug: suite read developer backend/.env (OCR_GATEWAY_ENABLED=true) so baseline tests ran the new path; conftest now pins gateway settings to code defaults. No assertion changed.",
       "approver": "pending senior review"
     }
   ]

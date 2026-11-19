@@ -80,9 +80,38 @@ def _isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(s, "checkpoint_db_path", str(tmp_path / "ckpt.db"), raising=False)
     monkeypatch.setattr(s, "use_docling", False, raising=False)
     monkeypatch.setattr("app.graph.llm._sleep", lambda attempt: None, raising=False)
+    _gateway_defaults(monkeypatch)
     database.reset_engine()
     yield
     database.reset_engine()
+    _clear_gateway_cache()
+
+
+def _clear_gateway_cache() -> None:
+    try:
+        from app.ocr_gateway import get_gateway_settings
+    except ImportError:
+        return
+    get_gateway_settings.cache_clear()
+
+
+def _gateway_defaults(monkeypatch) -> None:
+    """Every test starts from the gateway's CODE defaults (enabled=False).
+
+    A developer's backend/.env (e.g. OCR_GATEWAY_ENABLED=true for manual
+    testing) must never change what a test exercises: with it, the baseline
+    tests silently ran the new path. Tests that need the gateway turn it on
+    themselves (setenv / monkeypatch), which still works on top of this.
+    """
+    try:
+        from app.ocr_gateway.settings import GatewaySettings
+    except ImportError:
+        return
+    for key in list(os.environ):
+        if key.startswith("OCR_GATEWAY_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setitem(GatewaySettings.model_config, "env_file", None)
+    _clear_gateway_cache()
 
 
 # --------------------------------------------------------------------------
