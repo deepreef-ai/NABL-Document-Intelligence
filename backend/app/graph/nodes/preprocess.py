@@ -45,6 +45,41 @@ _MIN_ALNUM_RATIO = 0.35
 _BINARY_THRESHOLD = 128
 
 
+def _gateway_enabled() -> bool:
+    """Fix 1 rollback lever: OCR_GATEWAY_ENABLED. Off = the legacy path, unchanged."""
+    try:
+        from app.ocr_gateway import get_gateway_settings
+
+        return bool(get_gateway_settings().enabled)
+    except Exception:  # noqa: BLE001 — a broken gateway config must not break the legacy path
+        return False
+
+
+def _gateway_read(image: bytes, script: str | None):
+    """Read one image through the OCR gateway (app/ocr_gateway).
+
+    Returns (result, text, label). Text is the engine's ROW text (text_lines),
+    so a results-table row stays on one line, and each line is cleaned the same
+    way the legacy path cleans it. The label names the engine and model that
+    actually answered, plus any engine that failed before it, so a page's audit
+    entry says exactly how it was read. Raises OcrGatewayError (with every
+    engine's reason) when nothing could read the image.
+    """
+    from app.ocr_gateway import page_text, read_image
+
+    result = read_image(image, script)
+    lines = [clean_text(ln) for ln in page_text(result).split("\n")]
+    text = "\n".join(ln for ln in lines if ln)
+    label = f"{result.engine}:{result.model_used}"
+    if getattr(result, "quality_flag", None) == "flagged_blurry":
+        label += " (flagged_blurry)"
+    failed = [a for a in getattr(result, "attempts", []) if not a.get("ok")]
+    if failed:
+        label += " after " + "; ".join(
+            f"{a['engine']} failed: {str(a.get('reason', ''))[:120]}" for a in failed)
+    return result, text, label
+
+
 def _quality_ok(text: str, min_chars: int) -> bool:
     s = clean_text(text)
     if len(s) < min_chars:
@@ -234,7 +269,12 @@ def _with_chart(text: str, ocr_result, image_bytes: bytes | None = None) -> str:
         renderings = [(lines, boxes)]
         bw = _binarised(image_bytes) if image_bytes else None
         if bw:
-            second = local_ocr.extract_english(bw)
+            if _gateway_enabled():
+                from app.ocr_gateway import read_image
+
+                second = read_image(bw, "en")
+            else:
+                second = local_ocr.extract_english(bw)
             renderings.append((second.lines or [], second.boxes or []))
 
         return annotate(text, best_chart(*renderings))
@@ -254,6 +294,9 @@ def _ocr_page(pdf_bytes: bytes, page_number: int, dpi: int) -> tuple[str, float 
         # "page 2". Passing the one-based number here rasterised the NEXT
         # page for every page, and threw on the last one.
         image = pdf_utils.rasterize_page(pdf_bytes, page_number - 1, dpi=dpi)
+        if _gateway_enabled():
+            result, text, _label = _gateway_read(image, "english")
+            return _with_chart(text, result, image), getattr(result, "confidence", None), ""
         result = local_ocr.extract_english(image)
         # Line-per-line, not the joined blob. `.text` comes back as one long
         # string, which is fine for a page being read wholly by OCR and wrong
@@ -285,6 +328,19 @@ def _ocr_scanned_page(
     do with the page — and a Latin-alphabet reading of a Devanagari page is
     poor, but it beats an unreadable page.
     """
+    if _gateway_enabled():
+        # Fix 1: the gateway resolves the script (aliases like "hindi" included),
+        # picks the engine order and falls back on its own; one call per page.
+        try:
+            from app.documents import pdf_utils
+
+            image = pdf_utils.rasterize_page(pdf_bytes, page_number - 1, dpi=dpi)
+            result, text, label = _gateway_read(image, script)
+            return (_with_chart(text, result, image), getattr(result, "confidence", None),
+                    "", label)
+        except Exception as exc:  # noqa: BLE001 — every engine's reason is in the message
+            return "", None, str(exc)[:600], "gateway"
+
     from app.documents.ocr_client import SUPPORTED_SCRIPTS
 
     if script in SUPPORTED_SCRIPTS:
@@ -582,13 +638,22 @@ def preprocess_document(state: GraphState) -> dict:
         ocr_text, ocr_conf, ocr_error = "", None, ""
         if settings.ocr_enabled:
             try:
-                from app.documents import local_ocr
+                if _gateway_enabled():
+                    # Fix 1: the upload's script is honoured for images too (G10),
+                    # and rows stay on their own lines instead of one joined blob.
+                    result, text, label = _gateway_read(data, state.script)
+                    ocr_text = _with_chart(text, result, data)
+                    entries += audit(NODE, "page_ocr", f"read by {label}", page_number=1)
+                else:
+                    from app.documents import local_ocr
 
-                result = local_ocr.extract_english(data)
-                ocr_text = _with_chart(clean_text(getattr(result, "text", "") or ""), result, data)
+                    result = local_ocr.extract_english(data)
+                    ocr_text = _with_chart(clean_text(getattr(result, "text", "") or ""),
+                                           result, data)
                 ocr_conf = getattr(result, "confidence", None)
             except Exception as exc:  # noqa: BLE001
-                ocr_error = str(exc)[:300]
+                # Longer for the gateway: its message lists every engine's reason.
+                ocr_error = str(exc)[:600 if _gateway_enabled() else 300]
 
         if ocr_text:
             status = PageStatus.OCR

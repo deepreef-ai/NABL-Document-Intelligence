@@ -1,0 +1,61 @@
+{
+  "files": {
+    "scripts/run_suite.py": "a95da78a4af328805bcefb96058fe4acd34e027a5f015264f62f9676d9e2ea24",
+    "scripts/test_lock.py": "8baf3afc57f8ec0499268cb54a65932ab22a68be3e1bee8bfcf054feaa941694",
+    "tests/suite/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/suite/_support.py": "a0e1ec9190052d3a3a7eac19005fd1749cee9cc4b5861567f48ea47668548935",
+    "tests/suite/conftest.py": "46e3c0994fcb5b0dcc401e52be5e2867322d118d1e0fd9b8b46d5e667feb7b29",
+    "tests/suite/test_flow.py": "1517af8c6fba5450535da7f9fe581c5a2a928558100d79b801d05ad92fbb7d66",
+    "tests/suite/test_gateway.py": "51ad4fd10274a2ac8767ac9b9e27d4f86767b5945c446708e31e6382b4aa70f8",
+    "tests/suite/test_ocr_quality.py": "495a121e93cd73f37976f07632df2ce94e4c20beb072bf68f62eb7ca575f1bd9",
+    "tests/suite/test_units.py": "2c1c1a44d2a4bd8c4c5d774cd5cf0e40d5a51177605d2b975561f9b8922cd539",
+    "tests/suite/test_lambda.py": "66c4dfd238a67b4dcb2e78c6fde2a621cfd702e8be723e8928dbadfb1d25675d",
+    "tests/suite/test_english_vendored.py": "bfe91b29e4329db5584450123b419d8fef1377fc94a2d308bccc01e4151b634b"
+  },
+  "history": [
+    {
+      "when": "2026-11-19T07:34:39+00:00",
+      "action": "init",
+      "files": [
+        "scripts/run_suite.py",
+        "scripts/test_lock.py",
+        "tests/suite/__init__.py",
+        "tests/suite/_support.py",
+        "tests/suite/conftest.py",
+        "tests/suite/test_flow.py",
+        "tests/suite/test_gateway.py",
+        "tests/suite/test_ocr_quality.py",
+        "tests/suite/test_units.py"
+      ],
+      "reason": "Phase 1 baseline suite + Fix 1 acceptance tests written from spec before implementation was wired",
+      "approver": "baseline-setup (to be confirmed by reviewer)"
+    },
+    {
+      "when": "2026-11-19T07:53:49+00:00",
+      "action": "add",
+      "files": [
+        "tests/suite/test_lambda.py"
+      ],
+      "reason": "Lambda (deepreef-ocr) routing tests: new file, no locked file changed",
+      "approver": "pending senior review"
+    },
+    {
+      "when": "2026-11-19T08:12:03+00:00",
+      "action": "relock",
+      "files": [
+        "tests/suite/conftest.py"
+      ],
+      "reason": "Test isolation bug: suite read developer backend/.env (OCR_GATEWAY_ENABLED=true) so baseline tests ran the new path; conftest now pins gateway settings to code defaults. No assertion changed.",
+      "approver": "pending senior review"
+    },
+    {
+      "when": "2026-11-19T09:54:20+00:00",
+      "action": "add",
+      "files": [
+        "tests/suite/test_english_vendored.py"
+      ],
+      "reason": "Vendored English OCR model: parity + no external dependency",
+      "approver": "pending senior review"
+    }
+  ]
+}

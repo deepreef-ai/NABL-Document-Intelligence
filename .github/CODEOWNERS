@@ -1,0 +1,6 @@
+# The pipeline test suite and its tamper lock need a reviewer's approval to change.
+# A fix PR should change app code until the locked tests pass, never the tests.
+# Replace the team below with the real reviewers' GitHub handles or team.
+/backend/tests/suite/          @deepreef/nabl-reviewers
+/backend/scripts/test_lock.py  @deepreef/nabl-reviewers
+/backend/scripts/run_suite.py  @deepreef/nabl-reviewers

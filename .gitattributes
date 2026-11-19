@@ -1,0 +1,5 @@
+# Model weights are binary; never diff or normalise them.
+*.onnx binary
+# Vendored OCR model files are byte-exact copies verified by sha256:
+# no CRLF conversion on checkout (core.autocrlf=true would change the hash).
+backend/app/ocr_gateway/models/** -text

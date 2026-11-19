@@ -18,3 +18,6 @@ backend/graph_storage/checkpoints.db
 backend/graph_storage/checkpoints.db.backup
 backend/.env*
 !.env.example
+
+# test suite reports (regenerated every run)
+backend/test-reports/
