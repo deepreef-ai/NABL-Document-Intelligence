@@ -31,6 +31,7 @@ import re
 
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
+from app.documents.value_matching import normalize_for_search, numbers_supported, value_in_source
 from app.graph.nodes.helpers import audit, clean_text, err, normalise_for_match, similarity
 from app.graph.schemas import (
     EvidenceResult,
@@ -73,6 +74,31 @@ def _is_evidential(evidence: str) -> bool:
 #: OCR drops a character, the model tidies a space. The normalisation in
 #: helpers already folds the cosmetic differences; this absorbs the rest.
 _FUZZY_WINDOW_SLACK = 40
+
+
+_HAS_DIGIT = re.compile(r"\d")
+
+
+def _value_in_text(value, raw_text: str, alnum_text: str) -> bool:
+    """Is `value` really inside `raw_text`?
+
+    Values with NO digits keep the tolerant match (case, spacing, punctuation
+    ignored). Values WITH digits must pass the strict numeric check, because
+    the tolerant form strips the decimal point and sign: "1.5" became "15" and
+    matched "0.15" (015), and "5" matched "-5". The tolerant match is still
+    accepted for digit values, but only when every number in the value is a
+    whole number on the page (so a date written "12/03/2024" vs "12-03-2024"
+    keeps working, while "1.5" vs "0.15" does not).
+    """
+    value_norm = normalise_for_match(value)
+    if not value_norm:
+        return False
+    if not _HAS_DIGIT.search(str(value)):
+        return value_norm in alnum_text
+    source = normalize_for_search(raw_text)
+    return value_in_source(value, source) or (
+        value_norm in alnum_text and numbers_supported(value, source)
+    )
 
 
 def _find_in_page(needle_norm: str, page_norm: str) -> bool:
@@ -290,13 +316,15 @@ def validate_evidence(state: GraphState) -> dict:
             elif not value_norm:
                 status = EvidenceStatus.PARTIALLY_SUPPORTED
                 reason = "value normalises to nothing"
-            elif value_norm in normalise_for_match(evidence):
+            elif _value_in_text(f.value, evidence, normalise_for_match(evidence)):
                 status = EvidenceStatus.SUPPORTED
                 reason = "value occurs verbatim inside the quoted evidence"
-            elif similarity(f.value, evidence) >= threshold:
+            elif not _HAS_DIGIT.search(str(f.value)) and similarity(f.value, evidence) >= threshold:
+                # Fuzzy closeness is fine for words; for a number it can bless
+                # a wrong digit, so numbers never take this shortcut.
                 status = EvidenceStatus.SUPPORTED
                 reason = "value matches the quoted evidence closely"
-            elif value_norm in cited_text:
+            elif _value_in_text(f.value, state.page_text.get(cited or -1, ""), cited_text):
                 # Value is on the page, just not inside the quote the model
                 # chose. The value is real; the citation is imprecise.
                 status = EvidenceStatus.PARTIALLY_SUPPORTED
