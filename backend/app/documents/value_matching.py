@@ -76,3 +76,22 @@ def value_in_source(value, source_norm: str) -> bool:
     prefix = r"(?<![\d.,])" if value_norm[0].isdigit() else ""
     suffix = r"(?!\d|[.,]\d)" if value_norm[-1].isdigit() else ""
     return re.search(prefix + needle + suffix, _compact(source_norm)) is not None
+
+
+def numbers_supported(value, source_norm: str) -> bool:
+    """Every number inside `value` (e.g. the 13.2 in "13.2 g/dL", or the three
+    parts of a date) appears as a WHOLE number token in the source, with the
+    same sign / comparator ("-5" != "5", "<0.01" != "0.01"). False when the
+    value has digits but no standalone number (an identifier such as
+    "CIN123") — those must pass the strict check instead.
+    """
+    value_norm = normalize_for_search(value)
+    tokens = []
+    for m in _PAGE_NUMBER.finditer(value_norm):
+        d = _to_decimal(m.group("num"))
+        if d is not None:
+            tokens.append(((m.group("sign") or "").strip(), d))
+    if not tokens:
+        return False
+    page = _page_numbers(source_norm)
+    return all(t in page for t in tokens)
