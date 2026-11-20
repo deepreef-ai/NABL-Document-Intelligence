@@ -319,3 +319,117 @@ class GroqProvider(LlmProvider):
             raise
         except (KeyError, IndexError, ValueError) as exc:
             raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response.text[:300]}") from exc
+
+
+class AnthropicProvider(LlmProvider):
+    """Claude via the Anthropic Messages API (httpx, no SDK dependency).
+
+    Fourth link in the chain: list "anthropic" in LLM_PROVIDER_ORDER /
+    GRAPH_PROVIDER_ORDER (e.g. "groq,gemini,anthropic") to fall through to
+    Claude when the others fail. Supports page images (base64 image blocks),
+    including the `images` list the graph passes.
+
+    The Messages API has no JSON-mode switch, so want_json appends a
+    JSON-only instruction to the system prompt and strips a markdown code
+    fence if the model adds one anyway (parse_json_object still runs after).
+    Retry policy mirrors Groq/Gemini: 429/529/503 are retried up to
+    _MAX_ATTEMPTS with the same waits; 401/403 (LlmAuthError) and 400
+    (LlmBadRequestError, e.g. request too large) raise immediately so the
+    chain moves on to the next key/provider.
+    """
+
+    _ENDPOINT = "https://api.anthropic.com/v1/messages"
+    _VERSION = "2023-06-01"
+    _MAX_ATTEMPTS = 3
+    _RETRY_WAIT_SECONDS = 10.0
+    _JSON_INSTRUCTION = (
+        "\n\nRespond with a single valid JSON object only. No prose, no markdown, "
+        "no code fences."
+    )
+
+    def __init__(self, api_key: str, model: str, timeout: float, name: str = "anthropic", max_tokens: int = 4096, temperature: float = 0.2):
+        self.name = name
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+
+    @staticmethod
+    def _image_block(data: bytes, media_type: str | None) -> dict:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type or "image/png",
+                "data": base64.b64encode(data).decode("ascii"),
+            },
+        }
+
+    @staticmethod
+    def _strip_fence(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.rstrip().endswith("```"):
+                stripped = stripped.rstrip()[:-3]
+        return stripped.strip()
+
+    def generate(
+        self,
+        system: str,
+        user_text: str,
+        image: bytes | None = None,
+        image_media_type: str | None = None,
+        want_json: bool = False,
+        images: list[bytes] | None = None,
+    ) -> str:
+        content: list[dict] = []
+        if image is not None:
+            content.append(self._image_block(image, image_media_type))
+        for extra in images or []:
+            content.append(self._image_block(extra, None))
+        content.append({"type": "text", "text": user_text})
+
+        payload = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "system": system + (self._JSON_INSTRUCTION if want_json else ""),
+            "messages": [{"role": "user", "content": content}],
+        }
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": self._VERSION,
+            "content-type": "application/json",
+        }
+
+        last: LlmProviderError | None = None
+        for attempt in range(self._MAX_ATTEMPTS):
+            try:
+                response = httpx.post(self._ENDPOINT, json=payload, headers=headers, timeout=self.timeout)
+            except httpx.TimeoutException as exc:
+                raise LlmTimeoutError(f"{self.name} timed out after {self.timeout}s") from exc
+            except httpx.HTTPError as exc:
+                raise LlmProviderError(f"{self.name} request failed: {type(exc).__name__}") from exc
+
+            if response.status_code == 200:
+                break
+            error = classify_http_error(self.name, response.status_code, response.text[:400])
+            if not isinstance(error, LlmRateLimitError) or attempt == self._MAX_ATTEMPTS - 1:
+                raise error
+            last = error
+            time.sleep(self._RETRY_WAIT_SECONDS * (attempt + 1))
+        else:  # pragma: no cover - loop always breaks or raises
+            raise last or LlmProviderError(f"{self.name} exhausted retries")
+
+        try:
+            data = response.json()
+            text = "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
+            if not text:
+                raise LlmProviderError(f"{self.name} returned no text (stop_reason={data.get('stop_reason')!r})")
+            return self._strip_fence(text) if want_json else text
+        except LlmProviderError:
+            raise
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
+            raise LlmProviderError(f"{self.name} returned an unexpected response shape: {response.text[:300]}") from exc
