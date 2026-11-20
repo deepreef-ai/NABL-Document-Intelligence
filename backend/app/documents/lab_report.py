@@ -12,6 +12,7 @@ prompt rather than being folded into extractor.py's fixed-schema contract.
 """
 import re
 
+from app.documents.value_matching import normalize_for_search, value_in_source
 from app.llm.chain import LlmChain
 
 SYSTEM_PROMPT = (
@@ -250,21 +251,9 @@ _WHITESPACE = re.compile(r"\s+")
 
 
 def _normalize_for_search(value) -> str:
-    """Folds case, all whitespace, and dash variants so a value can be
-    searched for inside the OCR text without spacing/punctuation noise
-    producing a false "not found" — OCR writes "40 - 129" where the model
-    returns "40-129", and neither spelling is an error.
-
-    Deliberately NOT app/benchmark/compare.py's _normalize_value, despite
-    the overlap: that one exists to test two extracted values for EQUALITY
-    and maps placeholders ("N/A", "-", "none") to None, which is exactly
-    wrong here — this one is searching for a substring inside a large text
-    blob, where those are ordinary characters to match on, not "no value".
-    """
-    if value is None:
-        return ""
-    text = _DASH_VARIANTS.sub("-", str(value).strip().lower())
-    return _WHITESPACE.sub("", text)
+    """See value_matching.normalize_for_search. Spaces are now kept (single)
+    rather than stripped, because number-token boundaries need them."""
+    return normalize_for_search(value)
 
 
 def _verified_against_source(value, source_norm: str) -> bool:
@@ -283,8 +272,7 @@ def _verified_against_source(value, source_norm: str) -> bool:
     missed entirely would fail this check despite being right — not once in
     that 331-value sample, but the failure mode to watch as image reading
     improves."""
-    value_norm = _normalize_for_search(value)
-    return bool(value_norm) and value_norm in source_norm
+    return value_in_source(value, source_norm)
 
 
 def extract_lab_report(
