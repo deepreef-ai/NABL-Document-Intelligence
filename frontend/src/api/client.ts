@@ -50,7 +50,38 @@ export interface ExtractedFieldOut {
   needs_review?: boolean;
   source_page: number | null;
   source_bbox: { x: number; y: number; w: number; h: number } | null;
+  /** Sub-heading this field sits under in the source document. */
+  section?: string | null;
+  /**
+   * Gold-dataset section key — "lab_info", "patient_info", "signatories".
+   * Chosen by the backend (structured.py's route_field), never here.
+   */
+  group?: string | null;
   accepted: boolean;
+}
+
+/**
+ * One row of a results table, in the labelled dataset's shape.
+ *
+ * Every column is optional because the 53 gold records do not agree on which
+ * exist — `reference_range` in one lab's format, `bio_ref_interval` in
+ * another's, `test_protocol` in a third's. The table renders whichever columns
+ * the document actually carried rather than a fixed set with blanks.
+ */
+export interface TestRowOut {
+  panel_name?: string | null;
+  section?: string | null;
+  test_name?: string | null;
+  result?: string | null;
+  unit?: string | null;
+  reference_range?: string | null;
+  flag?: string | null;
+  method?: string | null;
+  sample_date?: string | null;
+  specimen?: string | null;
+  s_no?: string | null;
+  page_number?: number | null;
+  [column: string]: string | number | null | undefined;
 }
 
 export interface DocumentOut {
@@ -66,6 +97,12 @@ export interface DocumentOut {
   page_count: number | null;
   status: "uploaded" | "processing" | "extracted" | "failed";
   error: string | null;
+  /**
+   * Result-table rows with their columns intact. A results table is not a
+   * list of fields: flattened into scalars, "pH 6.5 5-9" becomes one string
+   * with the value and the reference range fused and nothing left to compare.
+   */
+  tests?: TestRowOut[];
   fields: ExtractedFieldOut[];
 }
 
@@ -87,11 +124,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.json() as Promise<T>;
 }
 
-export function createApplication(form_type: NablFormType) {
-  return request<{ application: Application; state: EligibilityState; message: string }>("/applications", {
+/**
+ * `skipEligibility` creates the application already unlocked. The upload
+ * endpoint rejects anything still in "eligibility" status, and the product no
+ * longer shows the wizard that used to clear it, so the one screen the user
+ * has could not otherwise accept a file.
+ */
+export function createApplication(form_type: NablFormType, skipEligibility = false) {
+  return request<{ application: Application; state: EligibilityState | null; message: string }>("/applications", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ form_type }),
+    body: JSON.stringify({ form_type, skip_eligibility: skipEligibility }),
   });
 }
 
@@ -126,6 +169,28 @@ export function listDocuments(applicationId: string) {
   return request<DocumentOut[]>(`/applications/${applicationId}/documents`);
 }
 
+/**
+ * One document's progress, without refetching it and all of its fields.
+ *
+ * Upload returns 202 as soon as the row exists and does the extraction
+ * afterwards, so the client has to ask when it has finished. `done` is the
+ * server's own verdict — the client must not infer it from `status`, since
+ * "failed" is finished too.
+ */
+export interface DocumentStatus {
+  document_id: string;
+  status: string;
+  doc_type: string | null;
+  page_count: number | null;
+  field_count: number;
+  error: string | null;
+  done: boolean;
+}
+
+export function getDocumentStatus(documentId: string) {
+  return request<DocumentStatus>(`/documents/${documentId}/status`);
+}
+
 export function reextractDocument(documentId: string, script = "english") {
   const form = new FormData();
   form.append("script", script);
@@ -134,6 +199,11 @@ export function reextractDocument(documentId: string, script = "english") {
 
 export function renderDocumentUrl(documentId: string, page = 0) {
   return `${API_BASE}/documents/${documentId}/render?page=${page}`;
+}
+
+/** The extraction in the labelled dataset's shape, for download or diffing. */
+export function structuredJsonUrl(documentId: string) {
+  return `${API_BASE}/documents/${documentId}/structured`;
 }
 
 export function getCompiledForm(applicationId: string, acceptedOnly = false) {

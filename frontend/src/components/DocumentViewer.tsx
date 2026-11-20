@@ -24,7 +24,11 @@ export default function DocumentViewer({ document, page, onPageChange, highlight
     return (
       <div className="document-viewer document-viewer-unrenderable">
         <p>
-          <strong>{document.filename}</strong> has no visual rendering (DOCX source). Extracted values below are
+          {/* Not the filename: uploads routinely carry the patient's name,
+              age and sex in it, and this panel is on screen for the whole
+              review. The message is about the format, which the reader can
+              see anyway. */}
+          <strong>This document</strong> has no visual rendering (DOCX source). Extracted values below are
           grounded to the whole document, not a specific region.
         </p>
       </div>
@@ -72,7 +76,10 @@ export default function DocumentViewer({ document, page, onPageChange, highlight
           <img
             key={`${document.id}-${page}`}
             src={renderDocumentUrl(document.id, page)}
-            alt={document.filename}
+            // Not the filename: alt text is read aloud by screen readers and
+            // shown when the image fails, and an uploaded filename can
+            // identify the patient. The page number is what orients a reader.
+            alt={`Page ${page + 1} of the uploaded document`}
             onLoad={(e) => {
               const img = e.currentTarget;
               setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });

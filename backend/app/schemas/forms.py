@@ -97,6 +97,37 @@ class BaseNablForm(BaseModel):
     # field name, not field_path, since these never had a dotted schema path
     # to begin with.
     extra_fields: dict[str, str] = Field(default_factory=dict)
+    # Result-table rows, carried through from Document.tests_json. Same role
+    # as extra_fields: real extracted data that has no slot anywhere else on
+    # a NABL application form, and was therefore invisible in the compiled
+    # form even though the pipeline had read it correctly. Rows stay as
+    # dicts with their columns separate (test_name / result / unit /
+    # reference_range / method / page_number ...) rather than being flattened,
+    # because that is the shape both the review UI and the gold dataset
+    # already speak. Grouped per source document so a multi-report
+    # application does not merge two labs' tables into one ambiguous list.
+    test_results: list[dict] = Field(default_factory=list)
+    # Data points read off a CHART/GRAPH printed in the document — a trend
+    # plot of one analyte over time, not a row of the results table. Kept in
+    # their own field because the two shapes genuinely differ: a chart point
+    # is (date, value) on a named series with axis bands and NO reference
+    # range or method; a table row is (result, unit, reference_range,
+    # method) stated once. MEASURED on 001_Lab-report.png, whose HbA1c
+    # scatter chart plots five historical readings (5.6 / 5.4 / 5.5 / 4.8 /
+    # 5.0 from 2015 to 2021) above a completely separate LIVER FUNCTION
+    # PROFILE table: all five points were being extracted as if they were
+    # rows of that table, which reads as the patient having been tested for
+    # haemoglobin five times in this one report.
+    chart_readings: list[dict] = Field(default_factory=list)
+    # Readings from the AGENTIC PIPELINE (app/graph/ — a LangGraph state
+    # machine; "graph" there means the node graph, NOT a chart). Its own
+    # field, never merged with the two above: a reading here carries an
+    # evidence_status, a confidence score, a normalized field name and the
+    # exact source span it was read from, which a test row and a chart point
+    # do not. One entry per run, each with its own `fields` list — populated
+    # by routers/review.py, not compile_form, since the agentic pipeline
+    # keeps a separate database (graph/database.readings_for_application).
+    agentic_extraction_results: list[dict] = Field(default_factory=list)
 
 
 class Nabl151Form(BaseNablForm):
@@ -167,6 +198,14 @@ class BaseRecognitionForm(BaseModel):
     pt_participation: list[RecognitionPTRecord] = Field(default_factory=list)
     # See BaseNablForm.extra_fields — same role, for the recognition-scheme forms.
     extra_fields: dict[str, str] = Field(default_factory=dict)
+    # See BaseNablForm.test_results — same role. The recognition schemes are
+    # PT-performance based, so a carried-through result table matters here at
+    # least as much as it does on a full accreditation form.
+    test_results: list[dict] = Field(default_factory=list)
+    # See BaseNablForm.chart_readings / .agentic_extraction_results — same
+    # roles, same separation.
+    chart_readings: list[dict] = Field(default_factory=list)
+    agentic_extraction_results: list[dict] = Field(default_factory=list)
 
 
 class Nabl155Form(BaseRecognitionForm):

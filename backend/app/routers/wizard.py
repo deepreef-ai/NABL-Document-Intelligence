@@ -12,6 +12,11 @@ router = APIRouter(tags=["wizard"])
 
 class CreateApplicationRequest(BaseModel):
     form_type: NablFormType
+    #: Create the application already unlocked, skipping the eligibility
+    #: wizard. The upload endpoint refuses anything still in "eligibility"
+    #: status, so a deployment that does not present the wizard has no other
+    #: way to reach upload. Off by default: the gate stays the norm.
+    skip_eligibility: bool = False
 
 
 class AnswerRequest(BaseModel):
@@ -31,6 +36,19 @@ def create_application(body: CreateApplicationRequest, db: Session = Depends(get
     db.add(application)
     db.commit()
     db.refresh(application)
+
+    if body.skip_eligibility:
+        # Unlock without asking the prerequisite questions. The caller has
+        # taken responsibility for eligibility; record that plainly rather
+        # than leaving it looking as though the wizard passed.
+        application.status = "unlocked"
+        db.commit()
+        db.refresh(application)
+        return {
+            "application": _serialize(application),
+            "state": None,
+            "message": "Eligibility wizard skipped; upload is unlocked.",
+        }
 
     state, message = WizardEngine(db).start(application)
     return {"application": _serialize(application), "state": state, "message": message}

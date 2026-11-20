@@ -2,6 +2,29 @@
   box-sizing: border-box;
 }
 
+/**
+ * The whole interface renders at 80%, so a browser at its default 100% shows
+ * what this UI used to show at 80% zoom — which is the density the screen was
+ * designed around. A review screen is a scan on one side and the values read
+ * off it on the other, and both want as much of the monitor as they can get.
+ *
+ * Done as one root zoom rather than by scaling several hundred px values:
+ * every padding, gap, radius, border and icon scales together and stays in
+ * proportion, and the factor is one number to change. `zoom` is used rather
+ * than `transform: scale()` because zoom reflows — a transform would paint
+ * the page smaller while it still occupied its full unscaled box, leaving
+ * dead space on the right and bottom.
+ *
+ * The cost is viewport units: inside a zoomed root, 100vh of layout paints as
+ * 80vh of screen. Every vh in this file is therefore divided by --ui-scale,
+ * so a "full height" panel still fills the window. Anything added later that
+ * uses vh has to do the same.
+ */
+:root {
+  --ui-scale: 0.8;
+  zoom: var(--ui-scale);
+}
+
 :root {
   --glass-bg: rgba(255, 255, 255, 0.5);
   --glass-bg-strong: rgba(255, 255, 255, 0.72);
@@ -70,7 +93,7 @@ body {
   max-width: 1240px;
   margin: 28px auto;
   padding: 32px clamp(20px, 4vw, 44px);
-  min-height: calc(100vh - 56px);
+  min-height: calc((100vh / var(--ui-scale)) - 56px);
   background: var(--glass-bg);
   backdrop-filter: blur(28px) saturate(180%);
   -webkit-backdrop-filter: blur(28px) saturate(180%);
@@ -83,7 +106,7 @@ body {
   .page {
     margin: 0;
     border-radius: 0;
-    min-height: 100vh;
+    min-height: calc(100vh / var(--ui-scale));
     border-width: 0;
   }
 }
@@ -101,7 +124,7 @@ button {
   color: var(--text);
   border-radius: 10px;
   padding: 7px 14px;
-  font-size: 14px;
+  font-size: 16px;
   transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
 }
 
@@ -140,7 +163,7 @@ button:disabled {
 }
 
 .form-type-group h2 {
-  font-size: 15px;
+  font-size: 17px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -157,7 +180,7 @@ button:disabled {
 .form-type-picker button {
   text-align: left;
   padding: 14px 18px;
-  font-size: 15px;
+  font-size: 17px;
   border-radius: 14px;
 }
 
@@ -207,13 +230,13 @@ button:disabled {
 }
 
 .chat-panel-header h2 {
-  font-size: 14px;
+  font-size: 16px;
   margin: 0;
   color: var(--text);
 }
 
 .chat-panel-header p {
-  font-size: 12px;
+  font-size: 13.5px;
   color: var(--text-muted);
   margin-top: 2px;
 }
@@ -267,7 +290,7 @@ button:disabled {
   max-width: 78%;
   padding: 10px 14px;
   border-radius: 16px;
-  font-size: 14px;
+  font-size: 16px;
   line-height: 1.5;
   white-space: pre-wrap;
   background: var(--glass-bg-soft);
@@ -361,7 +384,7 @@ button:disabled {
 .page.review-page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 56px);
+  height: calc((100vh / var(--ui-scale)) - 56px);
   overflow: hidden;
 }
 
@@ -454,7 +477,7 @@ button:disabled {
   right: 28px;
   bottom: 96px;
   width: 380px;
-  height: min(560px, 70vh);
+  height: min(560px, calc(70vh / var(--ui-scale)));
   z-index: 59;
   animation: chat-drawer-in 0.16s ease-out;
 }
@@ -562,7 +585,7 @@ button:disabled {
 }
 
 .form-letterhead-eyebrow {
-  font-size: 11px;
+  font-size: 12.5px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-muted);
@@ -570,13 +593,13 @@ button:disabled {
 }
 
 .form-letterhead-header h2 {
-  font-size: 16px;
+  font-size: 18px;
   margin: 0;
   word-break: break-word;
 }
 
 .form-completion-badge {
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 600;
   padding: 4px 10px;
   border-radius: 999px;
@@ -598,7 +621,7 @@ button:disabled {
   margin-top: 20px;
   padding-top: 14px;
   border-top: 1px dashed var(--border-soft);
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--text-muted);
   text-align: center;
 }
@@ -607,13 +630,20 @@ button:disabled {
   padding: 40px 20px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 16px;
 }
 
 .form-fields-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 20px 24px;
+  /* 250px, not 220px: labels are uppercase and several run long ("Test or
+     Calibration Method", "Relevant Experience Years"), and at 220 they
+     wrapped to two lines while the value under them sat half empty. */
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  /* The row gap is what separates one labelled value from the next. It was
+     20px against a 5px label-to-value gap, so a label sat almost as close to
+     the field ABOVE it as to its own value, and the column read as one
+     undifferentiated run. */
+  gap: 28px 26px;
 }
 
 /* Each field reads as a labeled blank on the letterhead, not a boxed input —
@@ -626,13 +656,18 @@ button:disabled {
 .form-field label {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 600;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  /* Uppercase needs more tracking than sentence case at the same size —
+     0.03em left "SAMPLE RECEIVED ON" looking like one long word. */
+  letter-spacing: 0.07em;
   color: var(--text-muted);
-  margin-bottom: 5px;
+  /* Against the 28px between rows, this binds the label to its own value
+     rather than letting it float between two fields. */
+  margin-bottom: 7px;
+  line-height: 1.35;
 }
 
 .field-status-confirmed {
@@ -650,7 +685,7 @@ button:disabled {
   border-bottom: 1.5px solid var(--border-soft);
   background: transparent;
   padding: 2px 2px 6px;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 500;
   color: var(--text);
   border-radius: 0;
@@ -692,13 +727,13 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   margin-top: 5px;
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--text-muted);
 }
 
 .form-field-caption button {
   padding: 3px 10px;
-  font-size: 11px;
+  font-size: 12.5px;
   flex-shrink: 0;
 }
 
@@ -720,6 +755,37 @@ button.accepted {
   border-color: transparent;
 }
 
+/* The per-field confirm toggle: a square tick rather than a text button.
+   Fixed width and height so the column stays aligned and the control does
+   not resize when it flips state. */
+.field-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 8px;
+  /* Unconfirmed: the tick is present but faint, so it reads as an empty
+     checkbox rather than an already-confirmed value. */
+  color: #9aa0a6;
+}
+
+.field-tick:hover:not(:disabled) {
+  border-color: #1a9151;
+  color: #1a9151;
+}
+
+.field-tick.accepted {
+  color: #fff;
+}
+
+.field-tick:focus-visible {
+  outline: 2px solid #1a9151;
+  outline-offset: 2px;
+}
+
 .compiled-form-preview {
   margin-top: 16px;
 }
@@ -736,7 +802,7 @@ button.accepted {
   padding: 14px;
   border-radius: 14px;
   overflow-x: auto;
-  font-size: 12px;
+  font-size: 13.5px;
   border: 1px solid var(--glass-border);
 }
 
@@ -744,13 +810,13 @@ button.accepted {
    backend any more, these are how you confirm a long scan was read end to
    end and see which pages actually produced fields. */
 .document-viewer-page-fields {
-  font-size: 12px;
+  font-size: 13.5px;
   color: var(--text-muted);
   margin-left: auto;
 }
 
 .extraction-source-badge {
-  font-size: 11px;
+  font-size: 12.5px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 3px 9px;
@@ -777,7 +843,7 @@ button.accepted {
 .page-chip {
   min-width: 28px;
   padding: 3px 6px;
-  font-size: 12px;
+  font-size: 13.5px;
   border-radius: 8px;
 }
 
@@ -792,27 +858,6 @@ button.accepted {
    was blank. */
 .page-chip-empty:not(.active) {
   opacity: 0.45;
-}
-
-.extraction-warnings {
-  margin: 12px 0 4px;
-  padding: 10px 14px;
-  border: 1px solid rgba(217, 119, 6, 0.35);
-  border-radius: 12px;
-  background: rgba(217, 119, 6, 0.08);
-  font-size: 13px;
-}
-
-.extraction-warnings strong {
-  display: block;
-  margin-bottom: 4px;
-  color: #b45309;
-}
-
-.extraction-warnings ul {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--text-muted);
 }
 
 /* ============================================================
@@ -840,8 +885,8 @@ button.accepted {
   width: 100%;
   margin: 0;
   padding: 0;
-  height: 100vh;
-  min-height: 100vh;
+  height: calc(100vh / var(--ui-scale));
+  min-height: calc(100vh / var(--ui-scale));
   border: 0;
   border-radius: 0;
   box-shadow: none;
@@ -859,7 +904,7 @@ button.accepted {
 }
 
 .review-page .review-header h1 {
-  font-size: 17px;
+  font-size: 19px;
   font-weight: 600;
   margin: 0;
   letter-spacing: -0.01em;
@@ -914,7 +959,7 @@ button.accepted {
 @media (max-width: 1024px) {
   .page.review-page {
     height: auto;
-    min-height: 100vh;
+    min-height: calc(100vh / var(--ui-scale));
     overflow: visible;
   }
 }
@@ -938,4 +983,188 @@ button.accepted {
   transform: none;
   box-shadow: none;
   text-decoration: underline;
+}
+
+/* ===========================================================================
+   Review form — gold sections, sub-headings, and the results table.
+
+   The review panel is a FORM, not a list: a gold-dataset section
+   ("Laboratory", "Patient"), then the heading the document itself printed
+   ("URINE CHEMISTRY"), then the fields. It replaces a single flat two-column
+   grid, which reflowed repeating table rows across both columns so a
+   five-sample results table interleaved and sample 1's id sat beside sample
+   2's number — unreadable, and the kind of thing a reviewer silently
+   mis-reads rather than notices.
+   =========================================================================== */
+
+.rg-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.rg-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rg-group { margin-bottom: 10px; }
+
+/* A static signpost, not a control: sections are always open, so the heading
+   must not look clickable. Collapsing was a mistake here — a reviewer reads
+   every section anyway, and a section that is empty because nothing was
+   extracted looks identical to one that is merely shut. */
+.rg-heading {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--glass-bg-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  padding: 9px 13px;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  font-size: 1.06rem;
+  letter-spacing: -0.005em;
+  text-align: left;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.rg-body { padding: 8px 0 6px 12px; }
+
+/* The document's own heading, one level in from the section. Quieter on
+   purpose: the section says what kind of value this is and is what a reviewer
+   scans for; the sub-heading only says which part of the page it came from.
+   Uppercase and rule-underlined so it reads as a form divider rather than as
+   another field label. */
+.rg-sub { margin-bottom: 14px; }
+.rg-sub:last-child { margin-bottom: 0; }
+
+.rg-subheading {
+  margin: 0 0 8px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.83rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* One repeating record — a table row from the document. Its own fields are
+   kept in a single visual block so they cannot interleave with the next
+   record's, which is the whole point of grouping them. */
+.rg-record {
+  border-left: 2px solid var(--border-soft);
+  padding: 2px 0 2px 12px;
+  margin-bottom: 10px;
+}
+
+.rg-record-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--accent);
+  margin: 4px 0 6px;
+  overflow-wrap: anywhere;
+}
+
+/* A record never reflows into two columns: side-by-side is exactly how the
+   original grid scrambled the table. */
+.rg-record-grid { grid-template-columns: minmax(0, 1fr) !important; }
+
+@media (max-width: 640px) {
+  .rg-body { padding-left: 4px; }
+  .rg-record { padding-left: 8px; }
+}
+
+/* ---------------------------------------------------------------------------
+   Results table.
+
+   A results table is not a list of fields. Rendered as one, a urine panel's
+   "pH 6.5 5-9" collapses into a single string with the reading and the
+   reference range fused — nothing to scan down, nothing to compare. Columns
+   stay columns.
+   --------------------------------------------------------------------------- */
+
+.tests-panel { margin-bottom: 16px; }
+.tests-panel:last-child { margin-bottom: 0; }
+
+/* A wide table scrolls inside its own box rather than pushing the review
+   column sideways and putting the whole page on a horizontal scrollbar. */
+.tests-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: var(--glass-bg-soft);
+}
+
+.tests-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.tests-table th {
+  text-align: left;
+  white-space: nowrap;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.tests-table td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--text);
+  vertical-align: top;
+}
+
+.tests-table tr:last-child td { border-bottom: none; }
+
+/* The reading is what the eye goes to; everything else on the row is context
+   for it. */
+.tests-table .tests-result {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Reads as "the document printed nothing here", not as a value. */
+.tests-blank { color: var(--text-muted); }
+
+.form-json-link {
+  font-size: 0.9rem;
+  padding: 5px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.form-json-link:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+
+/* A poll that timed out while the server is still working. Advisory, not an
+   error — the document has not failed, so it must not look like it has. */
+.warn {
+  color: #a8730a;
 }

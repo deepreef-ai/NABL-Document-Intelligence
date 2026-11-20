@@ -24,3 +24,12 @@ class LocalFileStorage:
 
     def path(self, key: str) -> Path:
         return self.base_dir / key
+
+    def delete(self, key: str) -> None:
+        """Remove a stored object. Missing is not an error.
+
+        A caller deleting a document has already decided the document is
+        going; failing here because the bytes were swept up by something else
+        would leave a row nobody can remove.
+        """
+        (self.base_dir / key).unlink(missing_ok=True)

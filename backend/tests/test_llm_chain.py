@@ -65,3 +65,23 @@ def test_parse_json_object_salvages_prose_wrapped_json():
 def test_parse_json_object_raises_when_nothing_json_like_is_present():
     with pytest.raises(JsonParseError):
         parse_json_object("no json here")
+
+
+def test_cooldown_wait_cap_covers_the_backoff_cap_the_chain_can_impose():
+    """The wait ceiling must not sit below the backoff ceiling.
+
+    graph.llm waits out a provider cooldown only while it is <=
+    max_cooldown_wait_seconds, and abandons the call otherwise. The chain's
+    own exponential backoff is capped at _BACKOFF_CAP_SECONDS. If the wait cap
+    is the smaller of the two, every cooldown that lands between them is one
+    the chain created and then refused to wait for, and the chunk is dropped
+    with no LLM ever seeing it.
+
+    MEASURED: with a 240s wait cap against the 300s backoff cap, cooldowns of
+    287s and 297s abandoned both chunks of a 17-page PDF (graph run 137) even
+    though all 17 pages had been read successfully.
+    """
+    from app.graph.config import GraphSettings
+    from app.llm.chain import _BACKOFF_CAP_SECONDS
+
+    assert GraphSettings().max_cooldown_wait_seconds >= _BACKOFF_CAP_SECONDS

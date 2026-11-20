@@ -57,13 +57,77 @@ SYSTEM_PROMPT = (
     "Respond with ONLY a JSON object of this exact shape:\n"
     '{"fields": {"<snake_case_key>": "<value exactly as written>", ...}, '
     '"tests": [{"test_name": "<name>", "result": "<value as written>", '
-    '"unit": "<unit or null>", "reference_range": "<range or null>"}, ...]}\n\n'
+    '"unit": "<unit or null>", "reference_range": "<range or null>"}, ...], '
+    '"charts": [{"series_name": "<what is plotted>", "unit": "<axis unit or null>", '
+    '"points": [{"label": "<x-axis label, usually a date>", "value": "<y value>"}, ...]}, ...]}\n\n'
     '"fields" holds every header/metadata value (names, dates, addresses, '
     "report numbers, sample details, letterhead/lab identity, accreditation "
     "numbers, page markers, sampling details, footnotes) using natural "
     'snake_case keys derived from the document\'s own printed labels. '
     '"tests" holds every row of a results table. Use an empty list for '
-    '"tests" if the document has no tabular results.'
+    '"tests" if the document has no tabular results.\n\n'
+    # MEASURED on 001_Lab-report.png: a scatter chart titled GLYCOSYLATED
+    # HEMOGLOBIN (HBA1C) plots five historical readings (5.6/5.4/5.5/4.8/5.0,
+    # dated 2015 to 2021) directly above an unrelated LIVER FUNCTION PROFILE
+    # table. All five points came back inside "tests", which reads as this
+    # one report having measured haemoglobin five times on five dates. They
+    # are prior results being charted for trend, not results of this report.
+    "CHARTS vs TABLES: a plotted graph is NOT a results table. If the "
+    "document contains a chart, trend plot or graph of a value over time, "
+    'put its data points in "charts" and NOT in "tests" — one entry per '
+    "plotted series, with each point's x-axis label (usually a date) and its "
+    "y value. A chart point is a historical reading shown for trend; a "
+    '"tests" row is a measurement THIS report made, and it is stated once '
+    "with its own reference range. Never report the same analyte as several "
+    '"tests" rows differing only by date — that is a chart. Use an empty '
+    'list for "charts" when the document plots nothing.\n\n'
+    # MEASURED across 1,267 extracted rows from 85 real documents: 19
+    # documents came back with a unit on ZERO of their rows, while 37 came
+    # back with one on every row. A whole-table miss like that is not the
+    # model failing row by row — it is the unit being printed somewhere the
+    # row itself does not repeat: in the column header ("Fat (%)"), once
+    # beside the parameter name, or in a units column set apart from the
+    # results column. The old prompt said only '"unit": "<unit or null>"',
+    # which gives no instruction to go and look. Cow-milk reports (Fat, SNF,
+    # protein, lactose — all in % or g/100ml) are the whole of that
+    # zero-unit cluster.
+    # MEASURED on 001_Lab-report.png: RapidOCR read the g/dL units column as
+    # "7P/6" on three consecutive rows (TOTAL PROTEIN, ALBUMIN, GLOBULIN).
+    # The model correctly refused to treat "7P/6" as a unit and left those
+    # rows unitless — right call on the text, but the IMAGE was attached the
+    # whole time and plainly shows g/dL. On the same document it also read
+    # "RATIO" correctly for ALBUMIN/GLOBULIN RATIO and still dropped it,
+    # because RATIO does not look like a conventional unit.
+    # MEASURED on 001_Lab-report.png at 0.9786 OCR confidence: RapidOCR
+    # returns every label with its spaces removed — "TOTALPROTEIN",
+    # "LIVERFUNCTIONPROFILE,SERUM", "ASPARTATEAMINOTRANSFERASE(AST/SGOT)",
+    # "METHOD:COLORIMETRICDIAZOMETHOD". Left alone, those glued strings were
+    # being written into the form verbatim as field names and test names.
+    # Asking the model to resegment beats a dictionary resegmenter, which
+    # splits medical terms into nonsense (see _ocr_page).
+    "SPACING: OCR frequently drops the spaces between words, so a label may "
+    "arrive fused (\"TOTALPROTEIN\", \"ALBUMIN/GLOBULINRATIO\", "
+    "\"ASPARTATEAMINOTRANSFERASE\"). Restore the spacing as the document "
+    "prints it, using the page image to confirm — report \"TOTAL PROTEIN\", "
+    "not \"TOTALPROTEIN\". Do not otherwise reword, expand or standardise a "
+    "name: keep the document's own wording, capitalisation and abbreviations.\n\n"
+    "The OCR text can CORRUPT a unit. Where the text in a units column is "
+    "not a plausible unit (\"7P/6\", \"9/dL\", \"UIL\", stray punctuation), "
+    "read that cell from the page IMAGE instead and report what the image "
+    "shows. Report exactly what is printed, whatever form it takes — RATIO, "
+    "INDEX, TITRE and similar are units here if the document prints them in "
+    "the units column. Do not silently leave a unit empty because the OCR "
+    "text for it was unreadable; the image is authoritative.\n\n"
+    "UNITS: a row's unit is often NOT printed on the row. Look for it in the "
+    "column header (\"Fat (%)\", \"Result in mg/dL\"), beside the parameter "
+    "name, in a separate units column, or stated once above the table for "
+    "every row — and apply it to each row it governs. If the unit appears "
+    "only inside the reference range (\"3.50-5.00 g/dl\"), report it in "
+    '"unit" as well as leaving the range as written. Use null only when the '
+    "document genuinely shows no unit, which is normal for qualitative "
+    "results (Absent/Present, Negative/Positive, a genotype) and for "
+    "dimensionless quantities (pH, ratios, specific gravity). Never invent a "
+    "unit from your own knowledge of what the test usually reports."
 )
 
 
@@ -91,11 +155,44 @@ class DocumentPayload:
 def _ocr_page(png: bytes, script: str, ocr_client: OcrClient | None) -> str:
     """Text for a page with no usable text layer. Same routing the live
     pipeline already uses: deepreef-ocr's Lambda for the scripts it has
-    models for, local RapidOCR (in-process, no AWS call) for English."""
+    models for, local RapidOCR (in-process, no AWS call) for English.
+
+    NOTE — text_repair.repair_glued_words is deliberately NOT applied here,
+    even though RapidOCR does fuse words on dense scans. MEASURED on
+    001_Lab-report.png (a clean image, OCR confidence 0.9786): OCR returns
+    "DIAGNOSTICREPORT", "TOTALPROTEIN", "LIVERFUNCTIONPROFILE,SERUM" and
+    "ASPARTATEAMINOTRANSFERASE(AST/SGOT)" with no spaces at all. Running the
+    repair over that turns the last one into "ASPARTATE AMINO TRANSFER AS E
+    (AST/SGOT)" — wordninja's dictionary is general English, so it invents
+    word boundaries inside medical terms. A model given the FUSED token can
+    resegment it correctly from domain knowledge plus the attached page
+    image; a model given falsely-split text has to undo the damage first.
+    The glued text is therefore passed through as-is and the system prompt
+    tells the model to restore spacing from the image. The repair is still
+    right for dataset_normalization, whose consumer is a text index rather
+    than a model."""
     if script in SUPPORTED_SCRIPTS:
         client = ocr_client or OcrClient()
         return client.extract(png, script).text
     return local_ocr.extract_english(png).text
+
+
+def _format_tables(grids: list[list[list[str]]], max_rows: int = 200) -> str:
+    """Pipe-delimited rows — the most compact unambiguous table rendering.
+
+    Kept cheap on tokens: a 273-row results table would otherwise double the
+    payload, so rows are capped and the cap is stated rather than silently
+    truncating (a model that cannot see the cut will confidently report the
+    table as complete)."""
+    out = []
+    for n, rows in enumerate(grids, 1):
+        out.append(f"[table {n}]")
+        for row in rows[:max_rows]:
+            out.append(" | ".join(row))
+        if len(rows) > max_rows:
+            out.append(f"... ({len(rows) - max_rows} further rows not shown here; "
+                       f"read them from the page text above)")
+    return "\n".join(out)
 
 
 def build_payload(
@@ -143,7 +240,17 @@ def build_payload(
             payload.warnings.append(f"page {i + 1} could not be rendered as an image: {exc}")
 
         if len(layer_text.strip()) >= MIN_PAGE_TEXT_CHARS:
-            payload.text_blocks.append(f"--- Page {i + 1} ---\n{layer_text}")
+            block = f"--- Page {i + 1} ---\n{layer_text}"
+            # The reconstructed table grid goes in ALONGSIDE the flat text,
+            # not instead of it. The flat text preserves everything outside
+            # tables; the grid is what puts a cell back in its own row. See
+            # pdf_utils.extract_tables for the measured reason — a units
+            # column that the text layer emits as loose standalone lines is
+            # unattributable without it.
+            grid = _format_tables(pdf_utils.extract_tables(data, i))
+            if grid:
+                block += f"\n\n--- Page {i + 1}: tables as a grid ---\n{grid}"
+            payload.text_blocks.append(block)
             continue
 
         # No usable text layer: OCR it rather than relying on the image alone.
