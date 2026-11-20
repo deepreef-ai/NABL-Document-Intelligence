@@ -26,7 +26,7 @@ import logging
 import re
 
 from app.documents.grounding import FieldResult, PipelineResult
-from app.graph.nodes.helpers import normalise_for_match
+from app.graph.nodes.helpers import normalise_for_match, strict_value_key
 from app.graph.runner import run_document
 from app.graph.structured import route_field
 from app.graph.schemas import (
@@ -71,12 +71,12 @@ def _absorb_open_duplicates(fields: list[FieldResult], *, mapped_start: int) -> 
     open_rows = fields[:mapped_start]
     by_value: dict[str, list[int]] = {}
     for i, row in enumerate(open_rows):
-        by_value.setdefault(normalise_for_match(row.value), []).append(i)
+        by_value.setdefault(strict_value_key(row.value), []).append(i)
 
     absorbed: set[int] = set()
     for slot in mapped:
         words = set(re.split(r"[^a-z0-9]+", slot.field.lower())) - {""}
-        for i in by_value.get(normalise_for_match(slot.value), []):
+        for i in by_value.get(strict_value_key(slot.value), []):
             if i in absorbed:
                 continue
             other = set(re.split(r"[^a-z0-9]+", open_rows[i].field.lower())) - {""}
@@ -186,7 +186,7 @@ def _collapse_repeats(extracted: list[ExtractedField]) -> list[FieldResult]:
 
     for f in usable:
         name = f.normalized_field_name
-        norm = normalise_for_match(f.value)
+        norm = strict_value_key(f.value)
         words = set(re.split(r"[^a-z0-9]+", name.lower())) - {""}
 
         if (name, norm) in seen:
@@ -198,7 +198,7 @@ def _collapse_repeats(extracted: list[ExtractedField]) -> list[FieldResult]:
             continue
         for longer in overlapping:
             kept = [(i, r) for i, r in kept
-                    if not (r.field == name and normalise_for_match(r.value) == longer)]
+                    if not (r.field == name and strict_value_key(r.value) == longer)]
             by_name[name] = [v for v in by_name[name] if v != longer]
             seen.discard((name, longer))
 
@@ -294,7 +294,7 @@ def run_graph_pipeline(
             continue
 
         repeating = "[]" in m.target_field
-        key = normalise_for_match(m.mapped_value)
+        key = strict_value_key(m.mapped_value)
         if key and not repeating:
             already = claimed.get(key)
             if already is not None and already != m.target_field:

@@ -95,3 +95,26 @@ def numbers_supported(value, source_norm: str) -> bool:
         return False
     page = _page_numbers(source_norm)
     return all(t in page for t in tokens)
+
+
+_SIGN_CODE = {"-": "neg", "+": "", "<": "lt", ">": "gt", "<=": "le", ">=": "ge"}
+
+
+def strict_value_key(value) -> str:
+    """Equality key for "are these two extracted values the same value?".
+
+    Like the old lowercase-alphanumerics key, but every number keeps its
+    decimal point, sign and comparator, so 1.5 / 15 / 0.15 / -1.5 / <1.5 all
+    get different keys while spacing, case, dash style and thousands commas
+    (and 1.50 == 1.5) still do not matter.
+    """
+    text = normalize_for_search(value)
+
+    def _canon(m):
+        d = _to_decimal(m.group("num"))
+        if d is None:
+            return m.group(0)
+        sign = _SIGN_CODE.get((m.group("sign") or "").strip(), "")
+        return f" x{sign}{format(d.normalize(), 'f').replace('.', 'p')}x "
+
+    return re.sub(r"[^a-z0-9]+", "", _PAGE_NUMBER.sub(_canon, text))

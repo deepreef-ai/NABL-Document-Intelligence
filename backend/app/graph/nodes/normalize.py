@@ -33,7 +33,7 @@ from datetime import date
 
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, clean_text, err, normalise_for_match, snake_case
+from app.graph.nodes.helpers import audit, clean_text, err, normalise_for_match, strict_value_key, snake_case
 from app.graph.prompts import MERGE_SYSTEM, merge_user
 from app.graph.schemas import ExtractedField, MergeRecord
 from app.graph.state import GraphState
@@ -117,7 +117,7 @@ def _veto(group_fields: list[ExtractedField]) -> str:
         return f"members disagree on data type ({sorted(types)})"
 
     sections = {normalise_for_match(f.section_name) for f in group_fields if f.section_name}
-    values = {normalise_for_match(f.value) for f in group_fields if f.value is not None}
+    values = {strict_value_key(f.value) for f in group_fields if f.value is not None}
     if len(sections) > 1 and len(values) > 1:
         return (
             f"members come from {len(sections)} different sections and hold "

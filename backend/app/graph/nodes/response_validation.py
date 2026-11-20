@@ -24,7 +24,7 @@ import logging
 from collections import Counter, defaultdict
 
 from app.graph.errors import ErrorType
-from app.graph.nodes.helpers import audit, err, normalise_for_match
+from app.graph.nodes.helpers import audit, err, normalise_for_match, strict_value_key
 from app.graph.schemas import ChunkStatus, ExtractedField, ExtractionStatus
 from app.graph.state import GraphState
 
@@ -99,7 +99,7 @@ def validate_responses(state: GraphState) -> dict:
         signature = (
             f.chunk_id,
             f.normalized_field_name,
-            normalise_for_match(f.value),
+            strict_value_key(f.value),
             normalise_for_match(f.exact_source_evidence),
         )
         if signature in seen:

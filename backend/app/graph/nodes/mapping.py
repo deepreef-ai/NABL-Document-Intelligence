@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, err, normalise_for_match, similarity, truncate
+from app.graph.nodes.helpers import audit, err, normalise_for_match, strict_value_key, similarity, truncate
 from app.graph.prompts import MAPPING_SYSTEM, mapping_user
 from app.graph.schemas import (
     ExtractedField,
@@ -222,7 +222,7 @@ def map_to_form(state: GraphState) -> dict:
         leaf = target.name.rsplit(".", 1)[-1].replace("[]", "")
         key = normalise_for_match(leaf)
         exact = source_by_norm.get(key)
-        if exact and len({normalise_for_match(f.value) for f in exact}) == 1:
+        if exact and len({strict_value_key(f.value) for f in exact}) == 1:
             best = max(exact, key=lambda f: f.confidence_score)
             mappings.append(FormMapping(
                 source_field=best.normalized_field_name,
