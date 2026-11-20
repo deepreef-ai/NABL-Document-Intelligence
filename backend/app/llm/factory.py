@@ -2,7 +2,7 @@ from functools import lru_cache
 
 from app.config import Settings, get_settings
 from app.llm.chain import LlmChain
-from app.llm.providers import GeminiProvider, GroqProvider, NovaProvider
+from app.llm.providers import AnthropicProvider, GeminiProvider, GroqProvider, NovaProvider
 
 # Each builder returns the providers for one NAME in the order string, and an
 # empty list when that provider isn't configured — so an unconfigured name is
@@ -52,7 +52,17 @@ def _groq(s: Settings) -> list:
     ]
 
 
-_BUILDERS = {"nova": _nova, "gemini": _gemini, "groq": _groq}
+def _anthropic(s: Settings) -> list:
+    return [
+        AnthropicProvider(
+            key, s.anthropic_model, s.llm_timeout_seconds,
+            name=_numbered("anthropic", i), max_tokens=s.anthropic_max_tokens,
+        )
+        for i, key in enumerate(s.anthropic_api_key_list)
+    ]
+
+
+_BUILDERS = {"nova": _nova, "gemini": _gemini, "groq": _groq, "anthropic": _anthropic}
 
 
 def _build_chain(settings: Settings, order: str) -> LlmChain:

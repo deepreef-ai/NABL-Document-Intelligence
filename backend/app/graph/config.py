@@ -49,6 +49,11 @@ class GraphSettings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"
     groq_max_tokens: int = 8192
+    # The chain itself is built from the app Settings (graph/llm.py); these
+    # mirror the other providers' fields for consistency.
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-5-5"
+    anthropic_max_tokens: int = 4096
     llm_timeout_seconds: float = 180.0
     llm_temperature: float = 0.0
 

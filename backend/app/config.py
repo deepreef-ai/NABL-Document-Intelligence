@@ -75,9 +75,20 @@ class Settings(BaseSettings):
     # the tier does not sell.
     groq_max_tokens: int = 8192
 
+    # Anthropic Claude (llm/providers.py's AnthropicProvider) - off unless
+    # ANTHROPIC_API_KEY is set AND "anthropic" is in the provider order.
+    # COMMA-SEPARATED for multiple keys (anthropic, anthropic-2, ...).
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-5-5"
+    anthropic_max_tokens: int = 4096
+
     @property
     def gemini_api_key_list(self) -> list[str]:
         return [k.strip() for k in self.gemini_api_key.split(",") if k.strip()]
+
+    @property
+    def anthropic_api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.anthropic_api_key.split(",") if k.strip()]
 
     @property
     def groq_api_key_list(self) -> list[str]:
