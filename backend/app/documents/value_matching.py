@@ -13,6 +13,7 @@ substring of the page text, so "5" was "found" in "-5" / "0.15", and "1.5" in
     the middle of a number.
 """
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 
@@ -30,12 +31,25 @@ _PAGE_NUMBER = re.compile(
 _VALUE_NUMBER = re.compile(rf"\s*(?P<sign>{_SIGN})?\s*(?P<num>{_NUM})\s*")
 
 
+_SUPERSCRIPT_RUN = re.compile("[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+")
+_SUPERSCRIPT_TO_ASCII = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-")
+# "^2" right after a letter / ")" is a unit exponent: m^2 == m² == m2.
+# After a digit (10^3) the caret is kept so it never collides with 103.
+_UNIT_EXPONENT_CARET = re.compile(r"(?<=[a-z)])\^(?=[-+]?\d)")
+_MICRO_FOLD = str.maketrans({"µ": "u", "μ": "u"})
+
+
 def normalize_for_search(value) -> str:
-    """Lowercases, unifies dash variants and comparator glyphs, collapses
-    whitespace to single spaces (kept — token boundaries matter for numbers)."""
+    """Lowercases, unifies dash variants, comparator glyphs, unit glyphs
+    (superscripts, micro sign, fullwidth digits via NFKC), collapses
+    whitespace to single spaces (kept — token boundaries matter for numbers).
+    Only comparison text is changed; callers keep the original string."""
     if value is None:
         return ""
-    text = _DASH_VARIANTS.sub("-", str(value).strip().lower()).translate(_COMPARATOR_FOLD)
+    text = _SUPERSCRIPT_RUN.sub(lambda m: "^" + m.group(0).translate(_SUPERSCRIPT_TO_ASCII), str(value))
+    text = unicodedata.normalize("NFKC", text).strip().lower().translate(_MICRO_FOLD)
+    text = _UNIT_EXPONENT_CARET.sub("", text)
+    text = _DASH_VARIANTS.sub("-", text).translate(_COMPARATOR_FOLD)
     return _WHITESPACE.sub(" ", text)
 
 
