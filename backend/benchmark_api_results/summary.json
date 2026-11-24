@@ -1,0 +1,26 @@
+{
+  "api": "http://localhost:8000",
+  "documents_scored": 2,
+  "documents_failed": 0,
+  "strict_keys": false,
+  "table_row_recall": 0.9286,
+  "hallucination_rate": 0.012,
+  "gold_covered": {
+    "accuracy": 0.8681,
+    "precision": 0.9634,
+    "recall": 0.8977,
+    "f1": 0.9294,
+    "tp": 79,
+    "fp": 3,
+    "fn": 9
+  },
+  "raw": {
+    "accuracy": 0.8587,
+    "precision": 0.9518,
+    "recall": 0.8977,
+    "f1": 0.924,
+    "tp": 79,
+    "fp": 4,
+    "fn": 9
+  }
+}

@@ -55,6 +55,51 @@ def rasterize_page(pdf_bytes: bytes, page_number: int, dpi: int = 200) -> bytes:
         doc.close()
 
 
+def extract_tables(pdf_bytes: bytes, page_number: int, max_tables: int = 4) -> list[list[list[str]]]:
+    """The page's tables as row/cell grids, via PyMuPDF's own table finder.
+
+    WHY this exists: a PDF's text layer flattens a table into reading order,
+    which routinely separates a cell from the row it belongs to. MEASURED on
+    Sample-Smart-Report-Clinics.pdf, whose haemoglobin table has a real units
+    column: the text layer emits "g/dL" as its own standalone line, with
+    nothing tying it to any particular analyte. A model reading that stream
+    cannot attribute the unit to a row, which is why 19 documents came back
+    with a unit on zero of their rows while 37 came back with one on every
+    row — the difference is whether the layout happened to keep cells inline.
+
+    find_tables() reconstructs the grid from ruling lines and alignment, so
+    the UNITS column lands back beside its own results. Verified on
+    1601353705-Cow-Milk: returns ['S. NO','PARAMETERS','METHOD','UNITS',
+    'RESULTS','LIMITS*'] as a header with each row's cells aligned under it.
+
+    Returns [] on any failure — a page whose tables cannot be read is still
+    worth extracting from its text.
+    """
+    # fitz.open is INSIDE the try: bytes that are not a real PDF raise
+    # FzErrorFormat right here, and this function is called opportunistically
+    # on whatever the caller happens to hold. Structure is a bonus, never a
+    # requirement — a page whose tables cannot be read is still worth
+    # extracting from its text, so every failure returns [].
+    doc = None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        found = doc[page_number].find_tables()
+        grids = []
+        for table in list(getattr(found, "tables", []))[:max_tables]:
+            rows = [[("" if cell is None else str(cell).replace("\n", " ").strip())
+                     for cell in row]
+                    for row in table.extract()]
+            # A single-column "table" is a layout artefact, not tabular data.
+            if len(rows) >= 2 and max(len(r) for r in rows) >= 2:
+                grids.append(rows)
+        return grids
+    except Exception:  # noqa: BLE001 — see above
+        return []
+    finally:
+        if doc is not None:
+            doc.close()
+
+
 def page_count(pdf_bytes: bytes) -> int:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:

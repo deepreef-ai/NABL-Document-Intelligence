@@ -21,6 +21,17 @@ class FieldResult:
     # extract_open_fields*) are routed by compiler.py into the compiled
     # form's extra_fields bucket rather than a named schema attribute.
     source: str = "llm"
+    #: Sub-heading this field sits under in the source document — "URINE
+    #: CHEMISTRY", "Senior Management". Lets the review screen group fields
+    #: the way the document does instead of showing one flat list. Empty
+    #: when the extractor could not attribute one.
+    section: str = ""
+    #: Which gold-dataset section this field belongs to — "lab_info",
+    #: "patient_info", "signatories". The labelled_dataset records are the
+    #: taxonomy, and app/graph/structured.py's route_field is the one place
+    #: that decides; carrying the answer here is what keeps the review form and
+    #: the exported JSON filing the same field in the same place.
+    group: str = ""
 
 
 @dataclass
@@ -42,6 +53,15 @@ class PipelineResult:
     # really read all 17 pages of this scan" is the first question worth
     # answering when an extraction looks thin, and it's invisible otherwise.
     page_count: int | None = None
+    # Result-table rows in the gold dataset's shape: one dict per analyte with
+    # test_name / result / unit / reference_range kept SEPARATE. A results
+    # table is not a list of fields — flattened into scalars it becomes
+    # ph = "6.5 5-9", with nothing left to sort, compare or check a range
+    # against. Empty for documents that carry no results table.
+    tests: list[dict] = field(default_factory=list)
+    # The whole document in the gold dataset's shape (document_info, lab_info,
+    # ..., tests[]), ready to diff against a labelled record.
+    structured: dict = field(default_factory=dict)
 
 
 def ground(value: str, candidates: list[tuple[str, Rect]]) -> Rect | None:

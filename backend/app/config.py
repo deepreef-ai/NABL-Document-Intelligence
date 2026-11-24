@@ -1,127 +1,106 @@
 from functools import lru_cache
+from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/app/config.py -> backend/.env. Anchored to this file rather than
+# left relative to the process CWD: scripts/ put backend/ on sys.path but
+# never chdir into it, so running them from the repo root silently loaded no
+# .env at all and reported "No LLM provider configured" with a valid one set.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+_ENV_FILE = _BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
     """Runtime configuration, overridable via env vars or a .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
-    # LLM — powers the wizard chat, classification, and extraction. Tried in
-    # `llm_provider_order` order, falling through to the next on failure (rate
-    # limit, outage, etc.) — set an API key for any subset of these; only
-    # Gemini currently gets used for the image-input (vision) calls.
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.6-flash"
-    groq_api_key: str = ""
-    groq_model: str = "qwen/qwen3.8-27b"
-    huggingface_api_key: str = ""
-    huggingface_model: str = "Qwen/Qwen2.5-7B-Instruct"
-    # Cerebras and OpenRouter are both OpenAI-chat-completions-compatible —
-    # see llm/providers.py's OpenAiCompatibleProvider. Cerebras runs Qwen/Llama
-    # on its own inference hardware, which is dramatically faster than either
-    # a CPU-only local Ollama or Groq/Gemini's shared free-tier queues; kept
-    # optional (empty key = provider skipped) like every other link here.
-    cerebras_api_key: str = ""
-    cerebras_model: str = "gpt-oss-120b"
-    openrouter_api_key: str = ""
-    openrouter_model: str = "google/gemma-4-31b-it:free"
-    # Amazon Nova on AWS Bedrock (llm/providers.py's NovaProvider) — no API
-    # key setting: authenticates via the ambient AWS credential chain, the
-    # same one documents/ocr_client.py's Lambda invoke already relies on.
-    # Blank model = provider skipped, same convention as every key above.
+    # Logging. The app had no logging configuration at all, so every
+    # log.info() in this codebase was silently discarded: uvicorn configures
+    # its own loggers only, and the root logger defaults to WARNING. That hid
+    # the existing diagnostics as well as the stage timings added in
+    # app/observability.py. Set to WARNING to quieten, DEBUG to trace.
+    log_level: str = "INFO"
+    # Stage timings are useful in dev and noisy in a tight production loop,
+    # so they can be silenced without turning down every other INFO line.
+    log_stage_timings: bool = True
+
+    # LLM — powers the wizard chat, classification, and extraction. Amazon
+    # Nova on AWS Bedrock (llm/providers.py's NovaProvider) is the primary
+    # provider: no API key setting for it — it authenticates via the ambient
+    # AWS credential chain, the same one documents/ocr_client.py's Lambda
+    # invoke already relies on. Blank model = provider skipped/not configured.
     # `nova_model` must be a region-prefixed inference-profile ID (see
     # NovaProvider's docstring for why the bare model ID is rejected).
     nova_model: str = ""
     nova_region: str = "us-east-1"
-    nova_max_tokens: int = 8192
+    # 8192 was too small for a big results table and cost us whole
+    # documents. MEASURED 2026-09-05: high-protein-paneer.pdf's 272 test
+    # rows serialize to ~11,100 output tokens, so the reply was cut off
+    # mid-JSON and the document scored zero. A reasoning model also spends
+    # THINKING tokens out of this same budget, which is why hp-lab-report
+    # truncated at ~3,500 tokens of actual content. The cap is a ceiling,
+    # not a reservation - a short document still returns a short reply and
+    # costs nothing extra - so it is set well clear of the largest document
+    # in the set rather than just above it.
+    nova_max_tokens: int = 32768
 
-    # Extra free-tier OpenAI-chat-completions-compatible providers — same
-    # OpenAiCompatibleProvider class, just another base URL/model. Each is
-    # independently optional (empty key = skipped, same as every provider
-    # above); adding one only widens the fallback chain, it doesn't replace
-    # anything. Model names/free-tier terms for all of these change often —
-    # verify against each provider's own docs before relying on a default here.
-    sambanova_api_key: str = ""
-    sambanova_model: str = "Meta-Llama-3.3-70B-Instruct"
-    mistral_api_key: str = ""
-    mistral_model: str = "mistral-small-latest"
-    nvidia_api_key: str = ""
-    nvidia_model: str = "meta/llama-3.1-8b-instruct"
-    # GitHub Models (https://docs.github.com/en/github-models) — auth is a
-    # plain GitHub personal access token (needs the "models: read" permission
-    # scope), not a provider-specific API key.
-    github_token: str = ""
-    github_model: str = "gpt-4o-mini"
+    # Google Gemini (llm/providers.py's GeminiProvider) — a KEYED fallback so
+    # extraction and the accuracy benchmark survive a Bedrock outage (see that
+    # class's docstring for the 2026-09 account-wide block that motivated it).
+    # Blank key = provider skipped, exactly like a blank nova_model, so leaving
+    # this unset keeps behaviour identical to before it existed.
+    # COMMA-SEPARATED for multiple keys. Gemini's free-tier quota is
+    # per-PROJECT-per-model (MEASURED 2026-09-04:
+    # GenerateRequestsPerDayPerProjectPerModel-FreeTier = 20 requests/day),
+    # so a key from a second project is a second allowance — each key
+    # becomes its own link in the fallback chain (gemini, gemini-2, ...) and
+    # the chain moves to the next one when a key is exhausted.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.6-flash"
+    gemini_max_tokens: int = 32768
 
-    # Key rotation: a second/third key for a provider you're already using is
-    # NOT a different provider — it's the same account family hitting a
-    # different rate-limit bucket. Each configured key becomes its own named
-    # entry in llm_provider_order (e.g. "gemini_2"), so llm/chain.py's
-    # per-provider cooldown tracks it independently — a 429 on key 1 doesn't
-    # cool down key 2, since they're genuinely separate quotas. Leave unset
-    # (empty) to skip; only makes sense once the base key above is also set.
-    gemini_api_key_2: str = ""
-    gemini_api_key_3: str = ""
-    groq_api_key_2: str = ""
+    # Groq (llm/providers.py's GroqProvider) — third fallback, a separate
+    # free-tier allowance again. MUST be a VISION model: the extraction
+    # pipeline sends the page image with the OCR text, and Groq's text-only
+    # models ignore image parts silently rather than erroring.
+    groq_api_key: str = ""
+    groq_model: str = "qwen/qwen3.8-27b"
+    # NOT raised alongside the other two: Groq's binding limit is a rate
+    # limit (MEASURED: 7,000 input and 1,000 output tokens/minute on the
+    # free tier, which rejected high-protein-paneer with a 413 on INPUT
+    # size alone), not the per-reply cap. A bigger cap cannot buy headroom
+    # the tier does not sell.
+    groq_max_tokens: int = 8192
 
-    llm_provider_order: str = "gemini,groq,huggingface,ollama"
-    llm_timeout_seconds: float = 30.0
+    @property
+    def gemini_api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.gemini_api_key.split(",") if k.strip()]
 
-    # Local model via Ollama — no API key, no rate limit, no hard payload-size
-    # cap (unlike Groq/HF's gateways), which is exactly what a 15+ page
-    # document extraction needs. Bounded instead by this machine's own RAM and
-    # the model's context window (see llm/providers.py's OllamaProvider for
-    # why `num_ctx` is set explicitly). No install required for the rest of
-    # the app to run — a missing/unreachable Ollama just fails over to the
-    # next provider in whichever order below includes it.
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:3b"
-    # Local CPU inference is much slower than a cloud API round-trip, and if
-    # nothing's currently resident in RAM the model has to cold-load from disk
-    # first — measured ~45s just for that on this machine before a single
-    # token of a trivial prompt comes back, before a real (longer) extraction
-    # prompt even starts generating.
-    #
-    # MEASURED 2026-08-30 on a 12th-gen i5 (qwen2.5:3b, Q4): a 24-field whole-
-    # form section (organisation.*) took 297s end to end (cold load + decode)
-    # asking the model to spell out a null entry for every absent field —
-    # right at the old 300s ceiling, which is what produced real timeouts.
-    # Instructing it to omit absent fields instead (see extractor.py's
-    # _FULL_FORM_SYSTEM / extract_section_fields) cut the same section to
-    # 115s warm. 210s balances "long enough for a cold-started, moderately
-    # full section to actually finish" against "short enough that a
-    # genuinely stuck/overloaded call falls through to the next provider in
-    # a bounded time" — a densely-populated worst-case section can still
-    # legitimately exceed this and fall back to Gemini/etc., which is the
-    # intended behavior (Ollama is the fast-and-free primary, not the only
-    # option), not a bug.
-    ollama_timeout_seconds: float = 210.0
-    # llama.cpp/Ollama sometimes under-uses the efficiency cores on a hybrid
-    # Intel chip when left to its own default thread count; 0 here means "ask
-    # the OS how many logical processors exist and use all of them" (see
-    # llm/providers.py's OllamaProvider) rather than hardcoding a number that
-    # wouldn't fit every machine this runs on.
-    ollama_num_thread: int = 0
-    # A generous ceiling, not a normal-case constraint: comfortably above
-    # what even a fully-populated 24-field section needs (measured well
-    # under 1024 tokens), so it only ever bites as a safety net against a
-    # runaway/repeating generation rather than truncating a real answer.
-    ollama_num_predict: int = 1024
+    @property
+    def groq_api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.groq_api_key.split(",") if k.strip()]
+
+    # Comma-separated, tried in order, first success wins (llm/chain.py). Put
+    # "nova,gemini" here to fall back automatically; "gemini" alone to force it.
+    llm_provider_order: str = "nova"
+    # 30s was tuned for short chat-style calls and is too short for extraction:
+    # one document is a page image plus its OCR text plus a ~1.5k-token system
+    # prompt, and a large results table takes far longer than 30s just to
+    # generate and transfer. scripts/generate_predictions_and_score.py already
+    # overrode this to 180s for exactly that reason; the app needed the same.
+    # A timeout also costs more than the one call — llm/chain.py backs the
+    # provider off 15s and DOUBLES that per consecutive timeout.
+    llm_timeout_seconds: float = 120.0
 
     # documents/pipeline.py's completed_application_form (whole-form,
-    # per-section) extraction uses this order instead of llm_provider_order.
-    # Ollama is PRIMARY here — local, free, no rate limit, no per-request
-    # payload cap, which is exactly what a many-section whole-form run wants
-    # — with every cloud provider kept as fallback for whenever it times out
-    # or is unreachable. llm/chain.py's per-provider cooldown means one
-    # timeout backs Ollama off (briefly, growing if it keeps happening) for
-    # THAT and the next few sections rather than disabling it outright, so
-    # it's retried on a later section instead of being benched for the rest
-    # of the run — see OllamaProvider's timeout/thread/num_predict tuning
-    # above for what makes it fast enough to actually carry this role.
-    chunked_extraction_provider_order: str = "ollama,gemini,cerebras,openrouter,groq,huggingface"
+    # per-section) extraction uses this order instead of llm_provider_order —
+    # kept as its own setting in case a many-section whole-form run ever
+    # needs a different provider order than everything else, though today
+    # both resolve to the same single provider.
+    chunked_extraction_provider_order: str = "nova"
 
     # deepreef-ocr: invoked directly as a Lambda function via the AWS SDK —
     # the same mechanism the pcsapaiv2 production service uses (it has no
@@ -156,6 +135,63 @@ class Settings(BaseSettings):
     # ceiling to be the thing that breaks first on a longer document. 110
     # roughly halves that and keeps form text legible.
     page_image_dpi: int = 110
+    # Pages read from a SCANNED PDF (documents/pipeline.py). Unlike the
+    # born-digital path — where PyMuPDF text is free and all 40 pages are read
+    # then chunked by character count — every scanned page costs a rasterize,
+    # an OCR pass and its own extraction call, so this is a real budget lever.
+    # It was hardcoded at 5, which silently truncated any longer report while
+    # still returning a confident-looking result: a 12-page scan reported 5
+    # pages' worth of fields with no indication the rest existed. Raised well
+    # clear of a typical report; lower it if quota is tighter than coverage.
+    max_scanned_pages: int = 25
+
+    # Per-document LLM call ceiling (documents/call_budget.py). Before this
+    # nothing counted calls and nothing capped them: MEASURED on this branch,
+    # a 17-page scan cost 68 and a 50-page PDF up to 74, against a free-tier
+    # allowance of ~40 calls/DAY — so one document could exhaust a day.
+    #
+    # The cost driver is chunks and pages, which vary hugely between documents
+    # of the same page count, so a page cap cannot express it. This can: the
+    # pipeline stops asking for more calls once the ceiling is reached and
+    # returns what it already has, with the reason recorded on the document
+    # (never raising — stopping early is an operating condition, not a
+    # failure).
+    max_classification_calls: int = 1
+    max_initial_extraction_calls: int = 4
+    max_recovery_calls: int = 2
+    max_total_llm_calls: int = 6
+
+    # documents/lab_report.py's extract_letterhead — a second, focused call for
+    # the masthead/footer block. MEASURED 2026-09-04 on a 48-document run: ~180
+    # of 363 never-extracted fields were exactly these (lab_phone, lab_email,
+    # laboratory_accreditation_no, cin, udyam_no, footer, ...), because one
+    # call asked to transcribe a 60-row results table loses the masthead. It
+    # DOUBLES the calls per document though, so turn it off against a tight
+    # free-tier quota.
+    lab_report_letterhead_pass: bool = True
+
+    # Retry ONE chunk per document whose extraction returned almost nothing
+    # despite the chunk carrying real text. MEASURED: three identical uploads
+    # of one scanned report returned 56, 1 and 60 values — about a third of
+    # attempts collapse silently, with no error to detect them by. Charged to
+    # the RECOVERY budget, capped at one retry so the letterhead pass keeps
+    # its call.
+    extraction_empty_retry: bool = True
+
+    # Whether the letterhead pass also receives a raster of page one. A lab's
+    # masthead is often a GRAPHIC, so lab_email / lab_address / cin are absent
+    # from a born-digital PDF's text layer entirely (MEASURED: 5 of 9 golden
+    # letterhead fields on one report were not in the 2,679 characters being
+    # sent). Turning this off is also how the benchmark isolates the effect of
+    # the image from model-to-model variance — same code, one flag.
+    letterhead_vision: bool = True
+
+    # documents/classifier.py's classify_locally_scored() answers with a
+    # confidence; at or above this it is trusted and NO classification LLM
+    # call is made at all. Below it, the real LLM classifier is asked. 0.70
+    # means "several independent signals agree" — see that function's
+    # docstring; the score is a bounded sum of signals, not a probability.
+    local_classification_min_confidence: float = 0.70
 
     database_url: str = "sqlite:///./nabl.db"
     storage_dir: str = "./storage"
@@ -164,7 +200,52 @@ class Settings(BaseSettings):
     # flagged yellow/red for mandatory human review, per the HITL spec.
     confidence_threshold: float = 0.85
 
-    cors_origins: list[str] = ["http://localhost:5173"]
+    # Both spellings of the dev host. A browser treats http://localhost:5173
+    # and http://127.0.0.1:5173 as different origins, so allowing only one
+    # makes the UI silently fail to reach the API depending on how the dev
+    # server happened to be started.
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
+    @field_validator("log_level")
+    @classmethod
+    def _valid_log_level(cls, v: str) -> str:
+        level = (v or "INFO").strip().upper()
+        allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+        if level not in allowed:
+            raise ValueError(f"log_level must be one of {sorted(allowed)}, got {v!r}")
+        return level
+
+    @field_validator("storage_dir", "qdrant_storage_dir")
+    @classmethod
+    def _anchor_dir(cls, value: str) -> str:
+        """Resolve a relative directory against backend/, not the process CWD.
+
+        These defaults are written as "./storage" and "./qdrant_storage", which
+        silently meant a DIFFERENT directory depending on where you happened to
+        launch from: running a script from backend/scripts/ created a second,
+        empty storage tree there while the server used backend/'s."""
+        path = Path(value)
+        return str(path if path.is_absolute() else (_BACKEND_DIR / path).resolve())
+
+    @field_validator("database_url")
+    @classmethod
+    def _anchor_sqlite(cls, value: str) -> str:
+        """Same for a RELATIVE sqlite path.
+
+        MEASURED: running scripts/benchmark_api.py from backend/scripts/ pointed
+        at backend/scripts/nabl.db — a brand new, empty file — and every query
+        failed with "no such table: applications", while the server was happily
+        using backend/nabl.db. An absolute URL (a test's tmp_path, a real
+        server) is left exactly as given.
+        """
+        prefix = "sqlite:///"
+        if not value.startswith(prefix):
+            return value
+        raw = value[len(prefix):]
+        if not raw or raw.startswith("/") or Path(raw).is_absolute():
+            return value  # in-memory, or already absolute
+        return prefix + str((_BACKEND_DIR / raw).resolve()).replace("\\", "/")
 
 
 @lru_cache

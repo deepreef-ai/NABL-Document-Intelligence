@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import ChatPanel from "../components/ChatPanel";
 import DocumentViewer from "../components/DocumentViewer";
-import FormField from "../components/FormField";
+import ReviewFieldGroups from "../components/ReviewFieldGroups";
+import TestResultsTable from "../components/TestResultsTable";
+import { dedupeRepeatedReadings, splitRedundantFields } from "../api/redundantFields";
 import {
   getChatHistory,
   getCompiledForm,
@@ -13,10 +15,58 @@ import {
   type ChatEntry,
   type CompiledFormResponse,
   type DocumentOut,
+  type ExtractedFieldOut,
 } from "../api/client";
 
+/**
+ * What to call a document on screen, without using its filename.
+ *
+ * Uploaded filenames are not neutral: a real one in this project reads
+ * "MrYASH_22Y_Male_1026987_20260630164920.PDF", which puts a patient's name,
+ * age and sex into the tab, the heading, every screenshot and any shared
+ * session. The document's classified type says what a reviewer needs.
+ *
+ * The index disambiguates two documents of the same type so tabs stay
+ * distinguishable; it is 1-based because it is a label, not an offset.
+ */
+function documentLabel(document: DocumentOut, index: number): string {
+  const type = (document.doc_type ?? "").trim();
+  const name = type ? titleCaseType(type) : "Document";
+  return index >= 0 ? `${name} ${index + 1}` : name;
+}
+
+/** "lab_report" / "lab-report" -> "Lab Report". */
+function titleCaseType(value: string): string {
+  return value
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
+/**
+ * The fields a document actually asks a person to confirm.
+ *
+ * Not `document.fields`: a lab report prints each analyte's method inside
+ * the results table, and extraction picks it up twice — once as the table's
+ * Method column and once as a loose "METHOD : BIURATE" pair. Showing both
+ * gives the reviewer a row of cards repeating the strings already in the
+ * column above, each with its own tick. splitRedundantFields folds those
+ * away, and only when the value really is in this document's table.
+ */
+function reviewableFields(document: DocumentOut): ExtractedFieldOut[] {
+  // Two folds, in order: drop methods the results table already prints, then
+  // collapse a path re-read off page furniture (a letterhead repeated on
+  // every page yields the same ISO line once per page).
+  const withoutTableMethods = splitRedundantFields(document.fields, document.tests ?? []).fields;
+  return dedupeRepeatedReadings(withoutTableMethods).fields;
+}
+
 function acceptedCount(document: DocumentOut): number {
-  return document.fields.filter((f) => f.accepted).length;
+  // Counted over the same set the form shows, so "n/n confirmed" can
+  // actually reach its total — a hidden field nobody can tick would
+  // otherwise hold the count below 100% forever.
+  return reviewableFields(document).filter((f) => f.accepted).length;
 }
 
 export default function ReviewPage() {
@@ -84,7 +134,7 @@ export default function ReviewPage() {
         <div className="review-content-column">
           <div className="review-document-column">
             <div className="document-tabs">
-              {documents.map((d) => (
+              {documents.map((d, i) => (
                 <button
                   key={d.id}
                   className={d.id === selectedId ? "active" : ""}
@@ -93,7 +143,8 @@ export default function ReviewPage() {
                     setPage(0);
                   }}
                 >
-                  {d.filename}
+                  {/* The type, not the filename — see documentLabel(). */}
+                  {documentLabel(d, i)}
                 </button>
               ))}
             </div>
@@ -122,59 +173,68 @@ export default function ReviewPage() {
                       {selectedDocument.doc_type ?? "unclassified"} · via {selectedDocument.extraction_source ?? "n/a"}
                       {selectedDocument.page_count !== null && ` · ${selectedDocument.page_count} page${selectedDocument.page_count === 1 ? "" : "s"} read`}
                     </p>
-                    <h2>{selectedDocument.filename}</h2>
+                    {/* The eyebrow above already carries the type, source
+                        and page count, so dropping the filename loses no
+                        information a reviewer needs while keeping
+                        identifying data off the screen. */}
+                    <h2>{documentLabel(selectedDocument, documents.indexOf(selectedDocument))}</h2>
                   </div>
-                  {selectedDocument.fields.length > 0 && (
-                    <span className={`form-completion-badge ${acceptedCount(selectedDocument) === selectedDocument.fields.length ? "complete" : ""}`}>
-                      {acceptedCount(selectedDocument)}/{selectedDocument.fields.length} confirmed
+                  {reviewableFields(selectedDocument).length > 0 && (
+                    <span className={`form-completion-badge ${acceptedCount(selectedDocument) === reviewableFields(selectedDocument).length ? "complete" : ""}`}>
+                      {acceptedCount(selectedDocument)}/{reviewableFields(selectedDocument).length} confirmed
                     </span>
                   )}
+                  {/* No "View JSON" link. A reviewer confirms values against
+                      the page beside them, in the field rows below; a raw
+                      dump is a second, unreviewable copy of the same data.
+                      The endpoint still exists for anything that needs the
+                      machine-readable shape. */}
                   <button onClick={() => handleReextract(selectedDocument.id)}>Re-extract</button>
                 </div>
 
-                {selectedDocument.error && (
-                  <div className="extraction-warnings">
-                    <strong>Extraction notes</strong>
-                    <ul>
-                      {selectedDocument.error.split("; ").map((note, i) => (
-                        <li key={i}>{note}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                {/* Extraction notes are intentionally not rendered. They are
+                    still returned by the API (the structured endpoint is
+                    unchanged, only the on-screen link to it is gone);
+                    per-field notes stay on the field they describe (see
+                    ExtractionGroups). */}
 
-                {selectedDocument.fields.length === 0 ? (
-                  <p className="form-empty-state">No structured fields extracted from this document.</p>
-                ) : (
-                  <div className="form-fields-grid">
-                    {selectedDocument.fields.map((f) => (
-                      <FormField
-                        key={f.id}
-                        field={f}
-                        threshold={threshold}
-                        isFocused={f.id === highlightedFieldId}
-                        onFocus={() => setHighlightedFieldId(f.id)}
-                        onJumpToPage={() => {
-                          if (f.source_page !== null) setPage(f.source_page);
-                          setHighlightedFieldId(f.id);
-                        }}
-                        onSave={(value) => handleSaveField(selectedDocument.id, f.id, value)}
-                        onAccept={() => handleAcceptField(selectedDocument.id, f.id, !f.accepted)}
-                      />
-                    ))}
-                  </div>
+                <ReviewFieldGroups
+                  fields={reviewableFields(selectedDocument)}
+                  threshold={threshold}
+                  highlightedFieldId={highlightedFieldId}
+                  onFocus={setHighlightedFieldId}
+                  onJumpToPage={(f) => {
+                    if (f.source_page !== null) setPage(f.source_page);
+                    setHighlightedFieldId(f.id);
+                  }}
+                  onSave={(fieldId, value) => handleSaveField(selectedDocument.id, fieldId, value)}
+                  onAccept={(f) => handleAcceptField(selectedDocument.id, f.id, !f.accepted)}
+                />
+
+                {/* Under the field sections, not pinned above them. It used
+                    to be pinned, on the reasoning that on a lab report the
+                    results ARE the document — but the form is read against
+                    the scan beside it, and a document that opens with its
+                    report number and date should open with "Report" here
+                    too. Pinning the table put it above every section no
+                    matter where the page printed it. */}
+                {(selectedDocument.tests?.length ?? 0) > 0 && (
+                  <section className="rg-group">
+                    <h3 className="rg-heading">Test Results</h3>
+                    <div className="rg-body">
+                      <TestResultsTable tests={selectedDocument.tests ?? []} />
+                    </div>
+                  </section>
                 )}
 
                 <p className="form-letterhead-footer">Auto-extracted draft — confirm each value before relying on it.</p>
               </div>
             )}
 
-            {compiled && (
-              <details className="compiled-form-preview">
-                <summary>Compiled application form (preview)</summary>
-                <pre>{JSON.stringify(compiled.form, null, 2)}</pre>
-              </details>
-            )}
+            {/* The compiled form is deliberately not dumped as JSON here.
+                It is mostly nulls until every document is reviewed, so it
+                read as a wall of empty keys directly under the values a
+                reviewer had just confirmed. */}
           </div>
         </div>
       </div>

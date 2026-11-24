@@ -1,0 +1,4 @@
+field,documents,correct,accuracy
+result,27,26,0.963
+unit,27,22,0.8148
+reference_range,26,26,1.0

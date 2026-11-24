@@ -1,5 +1,6 @@
 from app.llm.base import LlmProviderError
 from app.llm.factory import get_llm_chain
+from app.documents import call_budget as cb
 
 # One global list works across all 9 NABL form types without threading
 # form_type through classification: names are distinct enough (accreditation
@@ -76,12 +77,11 @@ def classify_image(image_bytes: bytes, media_type: str) -> tuple[str, float]:
 
 
 def _parse_classification(result: dict) -> tuple[str, float]:
-    """A capable cloud model reliably includes both keys; a small local
-    model under Ollama's generic `format: json` grammar (which only enforces
-    "this is valid JSON", not a specific schema) can drop one — observed in
-    practice with qwen2.5:3b omitting "confidence". A missing doc_type is a
-    genuine failure (nothing to classify with); a missing confidence just
-    means "uncertain," not "the call must be retried elsewhere.\""""
+    """Nova reliably includes both keys, but a JSON-mode reply is never a
+    guaranteed schema match — defended against here rather than assumed
+    away. A missing doc_type is a genuine failure (nothing to classify
+    with); a missing confidence just means "uncertain," not "the call must
+    be retried elsewhere.\""""
     doc_type = result.get("doc_type")
     if not doc_type:
         raise LlmProviderError(f"classifier: response had no doc_type: {result}")
@@ -125,3 +125,32 @@ def classify_locally(text: str, page_count: int, form_type: str) -> tuple[str, f
     if hits >= _MIN_SECTION_HITS:
         return "completed_application_form", 0.9
     return None
+
+
+def classify(
+    text: str, page_count: int, form_type: str,
+    filename: str = "", budget: "cb.CallBudget | None" = None,
+) -> tuple[str, float]:
+    """The one entry point callers should use: local check first, LLM second.
+
+    classify_locally() short-circuits the single doc_type worth skipping a
+    call for and returns None otherwise, so the fallback to classify_text()
+    is what makes it usable — every caller was open-coding that same pair.
+
+    `budget` gates only the LLM leg, matching how the vision path already
+    spends a CLASSIFICATION call: an exhausted budget yields ("other", 0.0)
+    rather than raising, because a document that could not be classified
+    still has to flow through the rest of the pipeline. The local leg is
+    free and so is never gated.
+
+    `filename` is accepted because callers pass it positionally, but neither
+    classifier consumes it yet — it is a hint for a future heuristic, not a
+    signal that is currently read. It is named rather than dropped so the
+    call sites keep documenting what they know about the document.
+    """
+    local = classify_locally(text, page_count, form_type)
+    if local is not None:
+        return local
+    if budget is not None and not budget.spend(cb.CLASSIFICATION):
+        return "other", 0.0
+    return classify_text(text)

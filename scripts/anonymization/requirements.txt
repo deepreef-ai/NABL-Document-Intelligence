@@ -1,0 +1,32 @@
+# Standalone requirements for the lab-report anonymiser.
+#
+# This utility is independent of the NABL Document Intelligence application and
+# can be installed into its own virtual environment:
+#
+#     python -m venv .venv-anonymise
+#     .venv-anonymise/Scripts/activate        # Windows
+#     pip install -r scripts/anonymization/requirements.txt
+#
+# Versions are pinned to what this tool was built and tested against.
+
+# PDF reading, rasterising, and — critically — true redaction. apply_redactions()
+# removes glyphs from the content stream rather than drawing over them, which is
+# the difference between anonymised and merely obscured.
+PyMuPDF==1.24.10
+
+# Image handling for scanned pages and standalone image files.
+Pillow>=10.0,<13
+
+# Array interchange between Pillow and the OCR engine.
+numpy>=1.24
+
+# OCR for scanned pages and for the verification pass. Optional in the sense
+# that --no-ocr runs without it, but scanned pages are then reported as
+# unreadable rather than passed through unredacted.
+rapidocr-onnxruntime==1.4.4
+
+# YAML configuration files. JSON config works without this.
+PyYAML>=6.0
+
+# --- development only -------------------------------------------------------
+pytest>=8.0

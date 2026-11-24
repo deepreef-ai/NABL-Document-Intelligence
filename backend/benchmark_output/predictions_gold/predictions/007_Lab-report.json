@@ -1,0 +1,116 @@
+{
+  "fields": {
+    "reg_date_and_time": "03/02/2019 06:33:46",
+    "coll_date_and_time": "03/02/2019 09:55:20",
+    "report_date_and_time": "03/02/2019 13:36:57",
+    "note": "The A1C test results reflects your average blood sugar level for the past two to three months.It is a better reflection of how well your diabetes treatment plan is working overall.\nA committee of experts from the American Diabetes Association recommend that the A1C test be the primary test used to diagnose prediabetes, type 1 diabetes and type 2 diabetes.",
+    "page": "3 of 7"
+  },
+  "field_confidence": {
+    "reg_date_and_time": 1.0,
+    "coll_date_and_time": 1.0,
+    "report_date_and_time": 1.0,
+    "note": 1.0,
+    "page": 1.0
+  },
+  "field_verified": {
+    "reg_date_and_time": true,
+    "coll_date_and_time": true,
+    "report_date_and_time": true,
+    "note": false,
+    "page": true
+  },
+  "tests": [
+    {
+      "test_name": "Macrocytosis",
+      "result": "1",
+      "unit": "%",
+      "reference_range": "0.0-5.5",
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "ESR - 1 Hour",
+      "result": "6",
+      "unit": "mm",
+      "reference_range": "<14",
+      "method": "Westergran Method",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "GLUCOSE (PP)",
+      "result": "442.0",
+      "unit": "mg/dl",
+      "reference_range": "80-140",
+      "method": "Glucose Oxidase - Peroxidase",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Glycosylated HbA1c With Graph - HbA1c",
+      "result": "11.40",
+      "unit": "%",
+      "reference_range": "Non-Diabetic Level: < 5.7%\nPre Diabetic :5.7-6.4%\nDiabetic Level :>=6.5%\nGoal :7.0%",
+      "method": "HPLC",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Mean Blood Glucose Level",
+      "result": "280.50",
+      "unit": "mg/dl",
+      "reference_range": null,
+      "method": null,
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "GLUCOSE (F)",
+      "result": "275.0",
+      "unit": "mg/dl",
+      "reference_range": "74-100",
+      "method": "Glucose Oxidase - Peroxidase",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "UREA",
+      "result": "36.0",
+      "unit": "mg/dl",
+      "reference_range": "17-49",
+      "method": "Urease/GLDH",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "CREATININE",
+      "result": "0.9",
+      "unit": "mg/dl",
+      "reference_range": "0.8 - 1.3",
+      "method": "Jaffe,Alkaline picrate",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "URIC ACID",
+      "result": "3.3",
+      "unit": "mg/dl",
+      "reference_range": "3.5-7.2",
+      "method": "Uricase/Peroxidase(POD)",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    }
+  ],
+  "pipeline_error": null
+}

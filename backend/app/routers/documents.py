@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+import logging
+import os
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -7,8 +10,9 @@ from app.db import get_db
 from app.documents import pdf_utils
 from app.documents.pipeline import process_document
 from app.documents.storage import LocalFileStorage
-from app.llm.base import redact_known_secrets
 from app.models import Application, Document, ExtractedField
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
 storage = LocalFileStorage()
@@ -46,12 +50,7 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
         )
     except Exception as exc:  # noqa: BLE001 — surface as a failed document, not a 500
         document.status = "failed"
-        # redact_known_secrets is defense-in-depth: every LLM provider already
-        # scrubs its own API key out of an error at the point of failure (see
-        # llm/base.py's classify_http_error), but this is the one place any
-        # exception in the whole pipeline ends up stored and returned straight
-        # to the frontend, so it gets a second, independent pass.
-        document.error = redact_known_secrets(str(exc))
+        document.error = str(exc)
         db.add(document)
         db.commit()
         return
@@ -65,7 +64,12 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
     # while the rest succeeded — see documents/pipeline.py's
     # extraction_warnings. The document is still "extracted" with whatever
     # DID come back, but the gap is recorded rather than silently hidden.
-    document.error = redact_known_secrets("; ".join(result.extraction_warnings)) or None
+    document.error = "; ".join(result.extraction_warnings) or None
+    # The gold-shaped record and its results table, stored as the pipeline
+    # produced them. getattr keeps the legacy extraction paths working: they
+    # build a PipelineResult without either.
+    document.structured_json = getattr(result, "structured", None) or None
+    document.tests_json = getattr(result, "tests", None) or None
 
     db.query(ExtractedField).filter(ExtractedField.document_id == document.id).delete()
     for f in result.fields:
@@ -78,15 +82,54 @@ def _run_pipeline(db: Session, document: Document, data: bytes, script: str) -> 
                 source_page=f.source_page,
                 source_bbox=f.source_bbox.model_dump() if f.source_bbox else None,
                 source=f.source,
+                section=getattr(f, "section", "") or None,
+                field_group=getattr(f, "group", "") or None,
             )
         )
     db.add(document)
     db.commit()
 
 
-@router.post("/applications/{application_id}/documents")
+def _run_pipeline_detached(document_id: str, data: bytes, script: str) -> None:
+    """Run the extraction after the response has been sent.
+
+    Owns its own Session. The request-scoped one from Depends(get_db) is closed
+    the moment the response is returned, so reusing it here would fail on the
+    first query — silently, in a background task, which is the worst place for
+    it.
+
+    Never raises: a BackgroundTask that throws is logged by Starlette and
+    otherwise vanishes, leaving the row stuck on "processing" forever. Any
+    failure is written to the row instead, which is what the client polls.
+    """
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, document_id)
+        if document is None:
+            log.warning("upload: document %s vanished before processing", document_id)
+            return
+        _run_pipeline(db, document, data, script)
+    except Exception as exc:  # noqa: BLE001 — must not die silently
+        log.exception("upload: background extraction failed for %s", document_id)
+        try:
+            document = db.get(Document, document_id)
+            if document is not None:
+                document.status = "failed"
+                document.error = f"{type(exc).__name__}: {exc}"
+                db.add(document)
+                db.commit()
+        except Exception:  # noqa: BLE001 — the DB itself is unhappy; nothing more to do
+            log.exception("upload: could not record failure for %s", document_id)
+    finally:
+        db.close()
+
+
+@router.post("/applications/{application_id}/documents", status_code=202)
 async def upload_document(
     application_id: str,
+    background: BackgroundTasks,
     file: UploadFile,
     script: str = Form("english"),
     db: Session = Depends(get_db),
@@ -118,9 +161,38 @@ async def upload_document(
     # not just this one, for the whole duration. Offload it to a thread.
     # (reextract_document below needs no such wrap — it's a plain `def`
     # endpoint, which Starlette already dispatches to a thread automatically.)
-    await run_in_threadpool(_run_pipeline, db, document, data, script)
-    db.refresh(document)
+    # Returns as soon as the document row exists; extraction continues in the
+    # background. MEASURED 2026-09-21: a 1-page PNG took 98-211s end to end and
+    # a 17-page PDF over 20 minutes, all of it spent holding the HTTP request
+    # open. The client now polls GET /documents/{id}/status instead.
+    background.add_task(_run_pipeline_detached, document.id, data, script)
     return _serialize(document)
+
+
+@router.get("/documents/{document_id}/status")
+def document_status(document_id: str, db: Session = Depends(get_db)) -> dict:
+    """Cheap progress poll for one document.
+
+    Deliberately not the full document: the review payload carries every
+    extracted field, its bbox and its evidence, which is a lot to re-send
+    every two seconds while the client is only asking "is it done yet?".
+
+    ``status`` is the same value the pipeline already writes:
+    processing -> extracted | failed.
+    """
+    document = _get_document(db, document_id)
+    return {
+        "document_id": document.id,
+        "status": document.status,
+        "doc_type": document.doc_type,
+        "page_count": document.page_count,
+        "field_count": len(document.fields),
+        # Populated on failure, and also on a partial success (some chunk
+        # could not be completed) - so a client must not treat it as fatal
+        # on its own; `status` is what decides.
+        "error": document.error,
+        "done": document.status in ("extracted", "failed"),
+    }
 
 
 @router.get("/applications/{application_id}/documents")
@@ -128,6 +200,36 @@ def list_documents(application_id: str, db: Session = Depends(get_db)):
     _get_application(db, application_id)
     docs = db.query(Document).filter(Document.application_id == application_id).all()
     return [_serialize(d) for d in docs]
+
+
+@router.get("/documents/{document_id}/structured")
+def structured_document(document_id: str, db: Session = Depends(get_db)):
+    """The extraction in the labelled dataset's own shape.
+
+    Same keys, same nesting, same tests[] columns as the hand-authored records
+    in labelled_dataset/, so a result can be diffed against ground truth
+    without a translation layer — and so what a reviewer downloads is the
+    format the rest of the pipeline already speaks.
+
+    Returned as stored rather than rebuilt from extracted_fields: those rows
+    have been through review edits, and "the extraction" should be one
+    coherent record rather than a reconstruction that drifts from what the
+    graph actually decided.
+    """
+    document = _get_document(db, document_id)
+    if not document.structured_json:
+        raise HTTPException(
+            404,
+            f"no structured output for {document.filename!r} — it was extracted "
+            "before this format existed, or by the legacy pipeline. Re-extract to build it.",
+        )
+    return JSONResponse(
+        content=document.structured_json,
+        headers={
+            "Content-Disposition":
+                f'inline; filename="{os.path.splitext(document.filename)[0]}.json"',
+        },
+    )
 
 
 @router.get("/documents/{document_id}/render")
@@ -151,6 +253,29 @@ def reextract_document(document_id: str, script: str = Form("english"), db: Sess
     return _serialize(document)
 
 
+@router.delete("/documents/{document_id}", status_code=204)
+def delete_document(document_id: str, db: Session = Depends(get_db)):
+    """Remove an uploaded document, its extracted fields and its bytes.
+
+    The upload screen offers this per row, so it has to actually remove the
+    document rather than hide it: a file taken off the list and still present
+    after a reload is worse than no control at all, because the next screen
+    compiles the form from whatever is still there.
+
+    Fields go first, explicitly. extracted_fields has a foreign key to
+    documents and no cascade configured, so deleting the parent alone leaves
+    orphan rows that the form compiler would still pick up.
+    """
+    document = _get_document(db, document_id)
+    db.query(ExtractedField).filter(ExtractedField.document_id == document.id).delete(
+        synchronize_session=False
+    )
+    storage.delete(document.storage_path)
+    db.delete(document)
+    db.commit()
+    return Response(status_code=204)
+
+
 def _serialize(document: Document) -> dict:
     return {
         "id": document.id,
@@ -162,6 +287,9 @@ def _serialize(document: Document) -> dict:
         "page_count": document.page_count,
         "status": document.status,
         "error": document.error,
+        # A results table is not a list of fields, so it travels as rows with
+        # its columns intact rather than being flattened into scalars.
+        "tests": document.tests_json or [],
         "fields": [
             {
                 "id": f.id,
@@ -171,6 +299,8 @@ def _serialize(document: Document) -> dict:
                 "source_page": f.source_page,
                 "source_bbox": f.source_bbox,
                 "source": f.source,
+                "section": f.section,
+                "group": f.field_group,
                 "accepted": f.accepted,
             }
             for f in document.fields

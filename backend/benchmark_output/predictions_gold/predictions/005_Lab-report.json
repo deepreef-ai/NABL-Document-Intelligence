@@ -1,0 +1,155 @@
+{
+  "fields": {
+    "age_gender": "/F",
+    "collection_date_time": "22/Dec/2023 09:01AM",
+    "reporting_date_time": "22/Dec/2023 01:39PM",
+    "discipline": "Clinical Biochemistry",
+    "group": "Max Chemo DayCare Screening Profile",
+    "sample_sub_group": "Liver Function Test (LFT), Serum",
+    "remarks": "Interpretation AST/ALT Ratio : -\nIn Case of deranged AST and/or ALT, the AST/ALT ratio is > 2.0 in alcoholic liver damage and < 2.0 in non – alcoholic liver damage",
+    "page": "Page 3 of 6"
+  },
+  "field_confidence": {
+    "age_gender": 1.0,
+    "collection_date_time": 1.0,
+    "reporting_date_time": 1.0,
+    "discipline": 1.0,
+    "group": 1.0,
+    "sample_sub_group": 1.0,
+    "remarks": 1.0,
+    "page": 1.0
+  },
+  "field_verified": {
+    "age_gender": true,
+    "collection_date_time": true,
+    "reporting_date_time": true,
+    "discipline": true,
+    "group": true,
+    "sample_sub_group": true,
+    "remarks": true,
+    "page": true
+  },
+  "tests": [
+    {
+      "test_name": "Total Protein",
+      "result": "6.20",
+      "unit": "g/dL",
+      "reference_range": "6.6 - 8.3",
+      "method": "Biuret",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Albumin",
+      "result": "3.7",
+      "unit": "g/dL",
+      "reference_range": "3.5 - 5.2",
+      "method": "Bromcresol Green (BCG)",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Globulin",
+      "result": "2.5",
+      "unit": "g/dl",
+      "reference_range": "2.3 - 3.5",
+      "method": "Calculated",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "A.G. ratio",
+      "result": "1.5",
+      "unit": null,
+      "reference_range": "1.2 - 1.5",
+      "method": "Calculated",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Bilirubin (Total)",
+      "result": "1.26",
+      "unit": "mg/dL",
+      "reference_range": "0.3 - 1.2",
+      "method": "DPD",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Bilirubin (Direct)",
+      "result": "0.29",
+      "unit": "mg/dL",
+      "reference_range": "0.0 - 0.2",
+      "method": "Diazotization",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Bilirubin (Indirect)",
+      "result": "0.97",
+      "unit": "mg/dL",
+      "reference_range": "0.1 - 1.0",
+      "method": "Calculated",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "SGOT- Aspartate Transaminase (AST)",
+      "result": "32",
+      "unit": "U/L",
+      "reference_range": "< 50",
+      "method": "UV without P5P",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "SGPT- Alanine Transaminase (ALT)",
+      "result": "23",
+      "unit": "U/L",
+      "reference_range": "< 35",
+      "method": "UV without P5P",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "AST/ALT Ratio",
+      "result": "1.39",
+      "unit": "Ratio",
+      "reference_range": null,
+      "method": "Calculated",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "Alkaline Phosphatase",
+      "result": "118",
+      "unit": "U/L",
+      "reference_range": "30 - 120",
+      "method": "PNPP, AMP Buffer",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    },
+    {
+      "test_name": "GGTP (Gamma GT), Serum",
+      "result": "42.0",
+      "unit": "U/L",
+      "reference_range": "7 - 50",
+      "method": "Enzymatic Rate",
+      "sample_id": null,
+      "confidence": 1.0,
+      "result_verified": true
+    }
+  ],
+  "pipeline_error": null
+}

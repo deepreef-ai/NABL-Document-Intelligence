@@ -1,0 +1,504 @@
+"""Docling supplies structure. It must never supply text, and never cost a read.
+
+Two properties matter more than anything Docling adds:
+
+1. **RapidOCR stays the only OCR engine.** Docling ships its own and would
+   otherwise run it over every scanned page, producing a second reading of text
+   already read — two values for one fact, differing in the margins, with
+   nothing to arbitrate. `do_ocr=False` is pinned here.
+
+2. **A structure pass that cannot run costs nothing.** Missing dependency,
+   timeout, crash, nonsense output — every one is a fallback to the RapidOCR +
+   PyMuPDF result the caller already holds, not an error that loses the
+   document.
+
+Docling is not installed in this environment (45 packages, including torch), so
+these tests inject a stub converter through `converter_factory`. That is the
+same seam production uses, so what is exercised is the real adapter.
+"""
+from types import SimpleNamespace
+
+import pytest
+
+from app.graph.docling_adapter import (
+    LAYOUT_MARKER,
+    DoclingResult,
+    LayoutTable,
+    PageLayout,
+    docling_available,
+    merge_ocr_and_docling_output,
+    normalize_docling_output,
+    parse_document_with_docling,
+)
+
+
+# --------------------------------------------------------------------------
+# building a fake Docling document
+# --------------------------------------------------------------------------
+
+
+def prov(page, bbox=(10.0, 20.0, 200.0, 40.0)):
+    box = SimpleNamespace(l=bbox[0], t=bbox[1], r=bbox[2], b=bbox[3])
+    return [SimpleNamespace(page_no=page, bbox=box)]
+
+
+def text_item(text, page=1, label="text", level=None):
+    return SimpleNamespace(text=text, label=label, level=level, prov=prov(page))
+
+
+def cell(text, row, col, row_span=1, col_span=1):
+    return SimpleNamespace(
+        text=text,
+        start_row_offset_idx=row,
+        start_col_offset_idx=col,
+        row_span=row_span,
+        col_span=col_span,
+    )
+
+
+def table_item(rows, page=1, spans=()):
+    n_rows, n_cols = len(rows), max((len(r) for r in rows), default=0)
+    cells = [cell(v, r, c) for r, row in enumerate(rows) for c, v in enumerate(row)]
+    cells += [cell(t, r, c, rs, cs) for (t, r, c, rs, cs) in spans]
+    return SimpleNamespace(
+        prov=prov(page),
+        data=SimpleNamespace(num_rows=n_rows, num_cols=n_cols, table_cells=cells),
+    )
+
+
+def docling_doc(items=(), tables=()):
+    inner = SimpleNamespace(
+        texts=list(items),
+        tables=list(tables),
+        iterate_items=lambda: [(i, 0) for i in items],
+    )
+    return SimpleNamespace(document=inner)
+
+
+def converter(document=None, *, raises=None, hangs=False):
+    def factory():
+        def convert(source):
+            if raises is not None:
+                raise raises
+            if hangs:
+                import time
+                time.sleep(30)
+            return document
+        return SimpleNamespace(convert=convert)
+    return factory
+
+
+@pytest.fixture
+def pdf(tmp_path):
+    p = tmp_path / "doc.pdf"
+    p.write_bytes(b"%PDF-1.4 stub")
+    return str(p)
+
+
+# --------------------------------------------------------------------------
+
+
+class TestDoclingOcrIsOff:
+    """The single most important line in the adapter."""
+
+    def test_pipeline_options_disable_docling_ocr(self):
+        pytest.importorskip("docling", reason="docling is an optional dependency")
+        from app.graph.docling_adapter import _pipeline_options
+
+        options = _pipeline_options()
+        assert options.do_ocr is False, "Docling OCR must never run; RapidOCR is the engine"
+        assert options.do_table_structure is True, "table structure is why Docling is here"
+
+    def test_the_adapter_imports_no_ocr_engine(self):
+        # It hands Docling a PATH and takes structure back. Checked on the
+        # IMPORTS rather than the source text, because the module docstring
+        # names RapidOCR when explaining why Docling's OCR is off — and a test
+        # that greps prose fails on its own documentation.
+        import ast
+        import inspect
+
+        from app.graph import docling_adapter
+
+        tree = ast.parse(inspect.getsource(docling_adapter))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+
+        forbidden = ("local_ocr", "rapidocr", "pytesseract", "easyocr", "paddleocr")
+        offenders = [m for m in imported for f in forbidden if f in m.lower()]
+        assert not offenders, f"the adapter must not import an OCR engine: {offenders}"
+
+
+class TestFallbacks:
+    """Every one of these keeps the RapidOCR + PyMuPDF result."""
+
+    def test_missing_dependency(self, pdf, monkeypatch):
+        monkeypatch.setattr("app.graph.docling_adapter.docling_available", lambda: False)
+        out = parse_document_with_docling(pdf)
+        assert out.ok is False
+        assert "not installed" in out.fallback_reason
+
+    def test_missing_file(self, tmp_path):
+        out = parse_document_with_docling(str(tmp_path / "gone.pdf"))
+        assert out.ok is False
+        assert "file not found" in out.fallback_reason
+
+    def test_runtime_crash(self, pdf):
+        out = parse_document_with_docling(pdf, converter_factory=converter(raises=RuntimeError("boom")))
+        assert out.ok is False
+        assert "RuntimeError" in out.fallback_reason and "boom" in out.fallback_reason
+
+    def test_timeout(self, pdf):
+        out = parse_document_with_docling(
+            pdf, timeout_seconds=0.2, converter_factory=converter(hangs=True))
+        assert out.ok is False
+        assert "timed out" in out.fallback_reason
+
+    def test_document_too_long_is_skipped_before_parsing(self, pdf):
+        called = []
+
+        def factory():
+            called.append(1)
+            return SimpleNamespace(convert=lambda s: docling_doc())
+
+        out = parse_document_with_docling(pdf, max_pages=10, expected_pages=200,
+                                          converter_factory=factory)
+        assert out.ok is False
+        assert "over the 10-page limit" in out.fallback_reason
+        assert not called, "the limit must be checked BEFORE paying for a parse"
+
+    def test_empty_output(self, pdf):
+        out = parse_document_with_docling(pdf, converter_factory=converter(docling_doc()))
+        assert out.ok is False
+        assert "no usable blocks or tables" in out.fallback_reason
+
+    def test_page_count_disagreement_discards_everything(self, pdf):
+        # A layout keyed to pages that do not exist would attach a table to the
+        # wrong page, and a confidently misplaced table beats no table only in
+        # the sense that it is worse.
+        doc = docling_doc([text_item("body", page=9)])
+        out = parse_document_with_docling(pdf, expected_pages=2, converter_factory=converter(doc))
+        assert out.ok is False
+        assert "beyond the 2 PyMuPDF found" in out.fallback_reason
+
+    def test_a_malformed_item_does_not_lose_the_page(self, pdf):
+        broken = SimpleNamespace(text="x", label="text")     # no prov at all
+        doc = docling_doc([broken, text_item("real content", page=1)])
+        out = parse_document_with_docling(pdf, converter_factory=converter(doc))
+        assert out.ok is True
+        assert [b.text for b in out.pages[1].blocks] == ["real content"]
+
+
+class TestNormalization:
+    def test_headings_keep_their_level(self):
+        doc = docling_doc([
+            text_item("RESULTS", page=1, label="section_header", level=2),
+            text_item("a paragraph", page=1),
+        ])
+        out = normalize_docling_output(doc)
+        heading = out.pages[1].headings[0]
+        assert (heading.text, heading.kind, heading.level) == ("RESULTS", "heading", 2)
+
+    def test_bounding_boxes_and_page_numbers_are_preserved(self):
+        doc = docling_doc([text_item("x", page=3)])
+        block = normalize_docling_output(doc).pages[3].blocks[0]
+        assert block.page_number == 3
+        assert block.bbox == (10.0, 20.0, 200.0, 40.0)
+        assert block.provenance == "docling"
+
+    def test_footers_and_pictures_are_dropped(self):
+        doc = docling_doc([
+            text_item("Page 1 of 4", page=1, label="page_footer"),
+            text_item("real", page=1),
+        ])
+        assert [b.text for b in normalize_docling_output(doc).pages[1].blocks] == ["real"]
+
+    def test_a_table_becomes_a_rectangular_grid(self):
+        doc = docling_doc(tables=[table_item([["Test", "Result"], ["pH", "6.5"]])])
+        table = normalize_docling_output(doc).pages[1].tables[0]
+        assert table.rows == [["Test", "Result"], ["pH", "6.5"]]
+        assert (table.n_rows, table.n_cols, table.cell_count) == (2, 2, 4)
+
+    def test_merged_cells_are_recorded_not_expanded(self):
+        # Writing a 3-column header into three cells would make one fact look
+        # like three values.
+        doc = docling_doc(tables=[
+            table_item([["", "", ""], ["a", "b", "c"]], spans=[("CHEMISTRY", 0, 0, 1, 3)])
+        ])
+        table = normalize_docling_output(doc).pages[1].tables[0]
+        assert table.merged_cells == [{"row": 0, "col": 0, "row_span": 1, "col_span": 3}]
+        assert table.rows[0] == ["CHEMISTRY", "", ""]
+
+    def test_a_single_row_is_not_a_table(self):
+        assert not LayoutTable(rows=[["a", "b"]], n_rows=1, n_cols=2).is_valid()
+
+    def test_a_single_column_is_not_a_table(self):
+        assert not LayoutTable(rows=[["a"], ["b"]], n_rows=2, n_cols=1).is_valid()
+
+    def test_an_all_blank_grid_is_not_a_table(self):
+        assert not LayoutTable(rows=[["", ""], ["", ""]], n_rows=2, n_cols=2).is_valid()
+
+    def test_counts_are_reported_for_logging(self):
+        doc = docling_doc(
+            [text_item("a", page=1)],
+            [table_item([["h1", "h2"], ["1", "2"], ["3", "4"]])],
+        )
+        out = normalize_docling_output(doc)
+        assert (out.block_count, out.table_count, out.row_count, out.cell_count) == (1, 1, 3, 6)
+
+
+class TestMerge:
+    """OCR text is authoritative; Docling adds only what is genuinely absent."""
+
+    def test_a_table_the_text_layer_already_read_is_not_appended(self):
+        # The duplicate-prevention case. A born-digital results table is read
+        # perfectly well by the text layer, and appending Docling's copy would
+        # hand the extractor the same analytes twice.
+        page = "URINE CHEMISTRY\npH 6.5 5-9\nGlucose NEG < 50 mg/dL\n"
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["pH", "6.5", "5-9"], ["Glucose", "NEG", "< 50 mg/dL"]],
+            n_rows=2, n_cols=3)])
+        assert merge_ocr_and_docling_output(page, layout) == page
+
+    def test_a_table_the_text_layer_missed_is_appended(self):
+        page = "REPORT\nSome narrative text.\n"
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["Analyte", "Result"], ["Iron", "5.46"]], n_rows=2, n_cols=2)])
+        out = merge_ocr_and_docling_output(page, layout)
+        assert page in out                     # never rewrites what OCR read
+        assert LAYOUT_MARKER in out
+        assert "Iron | 5.46" in out
+
+    def test_only_the_missing_rows_of_a_partly_read_table_are_added(self):
+        page = "Analyte Result\nIron 5.46\n"
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["Analyte", "Result"], ["Iron", "5.46"], ["Calcium", "148"]],
+            n_rows=3, n_cols=2)])
+        out = merge_ocr_and_docling_output(page, layout)
+        assert "Calcium | 148" in out
+        assert out.count("Iron") == 1, "a row already present must not be repeated"
+
+    def test_merging_twice_appends_once(self):
+        page = "narrative only"
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["a", "b"], ["1", "2"]], n_rows=2, n_cols=2)])
+        once = merge_ocr_and_docling_output(page, layout)
+        assert merge_ocr_and_docling_output(once, layout) == once
+
+    def test_merged_cell_counts_are_surfaced_in_the_block(self):
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["hdr", ""], ["1", "2"]], n_rows=2, n_cols=2,
+            merged_cells=[{"row": 0, "col": 0, "row_span": 1, "col_span": 2}])])
+        out = merge_ocr_and_docling_output("narrative", layout)
+        assert "1 merged cell(s)" in out
+
+    def test_no_layout_leaves_the_page_untouched(self):
+        assert merge_ocr_and_docling_output("text", None) == "text"
+
+    def test_a_layout_with_no_tables_leaves_the_page_untouched(self):
+        assert merge_ocr_and_docling_output("text", PageLayout(page_number=1)) == "text"
+
+
+class TestPreprocessIntegration:
+    """The call site: disabled by default, additive when on, silent on failure."""
+
+    def test_disabled_by_default(self):
+        from app.graph.config import get_graph_settings
+
+        assert get_graph_settings().use_docling is False
+
+    def test_disabled_flag_does_not_import_docling(self, monkeypatch, pdf):
+        from app.graph.nodes.preprocess import _apply_docling
+
+        called = []
+        monkeypatch.setattr("app.graph.docling_adapter.parse_document_with_docling",
+                            lambda *a, **k: called.append(1))
+        settings = SimpleNamespace(use_docling=False)
+        assert _apply_docling(None, pdf, settings, {}, {}, []) == []
+        assert not called
+
+    def test_a_fallback_is_recorded_and_pages_are_left_alone(self, monkeypatch, pdf):
+        from app.graph.nodes.preprocess import _apply_docling
+        from app.graph.schemas import PageRecord
+
+        monkeypatch.setattr(
+            "app.graph.docling_adapter.parse_document_with_docling",
+            lambda *a, **k: DoclingResult(fallback_reason="docling is not installed"))
+
+        page_text = {1: "original text"}
+        page_meta = {1: PageRecord(page_number=1, text="original text", char_count=13)}
+        entries = _apply_docling(None, pdf, SimpleNamespace(
+            use_docling=True, docling_timeout_seconds=1.0, docling_max_pages=50),
+            page_text, page_meta, [])
+
+        assert page_text[1] == "original text"      # untouched
+        assert page_meta[1].layout is None
+        assert any("docling_fallback" in str(e) or "fallback" in str(e) for e in entries)
+
+    def test_success_enriches_without_replacing_ocr_text(self, monkeypatch, pdf):
+        from app.graph.nodes.preprocess import _apply_docling
+        from app.graph.schemas import PageRecord
+
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["Analyte", "Result"], ["Iron", "5.46"]], n_rows=2, n_cols=2)])
+        monkeypatch.setattr(
+            "app.graph.docling_adapter.parse_document_with_docling",
+            lambda *a, **k: DoclingResult(ok=True, pages={1: layout}, seconds=0.5))
+
+        page_text = {1: "REPORT narrative"}
+        page_meta = {1: PageRecord(page_number=1, text="REPORT narrative", char_count=16)}
+        _apply_docling(None, pdf, SimpleNamespace(
+            use_docling=True, docling_timeout_seconds=1.0, docling_max_pages=50),
+            page_text, page_meta, [])
+
+        assert "REPORT narrative" in page_text[1]   # OCR text preserved verbatim
+        assert "Iron | 5.46" in page_text[1]        # structure added
+        assert page_meta[1].has_table is True
+        assert page_meta[1].layout is layout
+        assert page_meta[1].char_count == len(page_text[1])
+
+    def test_ocr_confidence_survives_the_structure_pass(self, monkeypatch, pdf):
+        from app.graph.nodes.preprocess import _apply_docling
+        from app.graph.schemas import PageRecord
+
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["a", "b"], ["1", "2"]], n_rows=2, n_cols=2)])
+        monkeypatch.setattr("app.graph.docling_adapter.parse_document_with_docling",
+                            lambda *a, **k: DoclingResult(ok=True, pages={1: layout}))
+        meta = {1: PageRecord(page_number=1, text="x", ocr_applied=True, ocr_confidence=0.97)}
+        _apply_docling(None, pdf, SimpleNamespace(
+            use_docling=True, docling_timeout_seconds=1.0, docling_max_pages=50),
+            {1: "x"}, meta, [])
+        assert meta[1].ocr_applied is True
+        assert meta[1].ocr_confidence == 0.97
+
+
+class TestSchemaCompatibility:
+    def test_page_record_layout_defaults_to_none(self):
+        from app.graph.schemas import PageRecord
+
+        assert PageRecord(page_number=1).layout is None
+
+    def test_a_page_record_still_serialises_without_a_layout(self):
+        from app.graph.schemas import PageRecord
+
+        dumped = PageRecord(page_number=1, text="x").model_dump()
+        assert dumped["layout"] is None
+        assert dumped["page_number"] == 1
+
+    def test_the_application_starts_without_docling_installed(self):
+        # The whole point of the optional dependency: importing the app must
+        # not require 45 packages and torch.
+        assert docling_available() in (True, False)
+        import app.main  # noqa: F401
+
+
+class TestDocumentTypeRouting:
+    """PyMuPDF decides the branch: digital to Docling, scanned to OCR.
+
+    Docling runs with do_ocr=False, so on a scanned page it has NO text to
+    attach structure to. MEASURED: a structure pass costs ~78s on a 2-page
+    report, and spending that to return nothing is the waste this fork exists
+    to prevent. The two engines never both read the same page.
+    """
+
+    def _settings(self):
+        return SimpleNamespace(use_docling=True, docling_timeout_seconds=1.0,
+                               docling_max_pages=50)
+
+    def test_an_all_scanned_document_never_calls_docling(self, monkeypatch, pdf):
+        from app.graph.nodes.preprocess import _apply_docling
+        from app.graph.schemas import PageRecord
+
+        called = []
+        monkeypatch.setattr("app.graph.docling_adapter.parse_document_with_docling",
+                            lambda *a, **k: called.append(1))
+        meta = {1: PageRecord(page_number=1, text="ocr text", ocr_applied=True)}
+        entries = _apply_docling(None, pdf, self._settings(), {1: "ocr text"}, meta, [],
+                                 digital_pages=[], scanned_pages=[1])
+        assert not called, "a scanned-only document must not pay for a structure pass"
+        assert any("skipped" in str(e) for e in entries)
+
+    def test_a_digital_document_does_call_docling(self, monkeypatch, pdf):
+        from app.graph.nodes.preprocess import _apply_docling
+        from app.graph.schemas import PageRecord
+
+        layout = PageLayout(page_number=1, tables=[LayoutTable(
+            rows=[["Analyte", "Result"], ["Iron", "5.46"]], n_rows=2, n_cols=2)])
+        monkeypatch.setattr("app.graph.docling_adapter.parse_document_with_docling",
+                            lambda *a, **k: DoclingResult(ok=True, pages={1: layout}))
+        meta = {1: PageRecord(page_number=1, text="narrative")}
+        _apply_docling(None, pdf, self._settings(), {1: "narrative"}, meta, [],
+                       digital_pages=[1], scanned_pages=[])
+        assert meta[1].layout is layout
+
+    def test_a_mixed_document_enriches_only_its_digital_pages(self, monkeypatch, pdf):
+        # Page 1 digital, page 2 scanned. Docling may report both; only the
+        # digital one may be touched, because page 2's text is the OCR
+        # engine's reading and Docling never saw its pixels.
+        from app.graph.nodes.preprocess import _apply_docling
+        from app.graph.schemas import PageRecord
+
+        table = LayoutTable(rows=[["a", "b"], ["1", "2"]], n_rows=2, n_cols=2)
+        monkeypatch.setattr(
+            "app.graph.docling_adapter.parse_document_with_docling",
+            lambda *a, **k: DoclingResult(ok=True, pages={
+                1: PageLayout(page_number=1, tables=[table]),
+                2: PageLayout(page_number=2, tables=[table]),
+            }))
+        meta = {1: PageRecord(page_number=1, text="digital"),
+                2: PageRecord(page_number=2, text="scanned", ocr_applied=True)}
+        _apply_docling(None, pdf, self._settings(), {1: "digital", 2: "scanned"}, meta, [],
+                       digital_pages=[1], scanned_pages=[2])
+        assert meta[1].layout is not None
+        assert meta[2].layout is None, "a scanned page must keep the OCR engine's reading"
+
+
+class TestScriptRoutedOcr:
+    """deepreef-ocr and RapidOCR are different alphabets, not a spare tyre."""
+
+    def test_latin_goes_straight_to_rapidocr(self, monkeypatch):
+        from app.graph.nodes import preprocess
+
+        lambda_calls = []
+        monkeypatch.setattr("app.documents.ocr_client.OcrClient",
+                            lambda *a, **k: lambda_calls.append(1))
+        monkeypatch.setattr(preprocess, "_ocr_page", lambda *a: ("latin text", 0.9, ""))
+        text, conf, err, engine = preprocess._ocr_scanned_page(b"x", 1, 200, "english")
+        assert (text, engine) == ("latin text", "rapidocr")
+        assert not lambda_calls, "deepreef has no Latin model; calling it wastes a round trip"
+
+    def test_devanagari_goes_to_deepreef(self, monkeypatch):
+        from app.graph.nodes import preprocess
+
+        monkeypatch.setattr("app.documents.pdf_utils.rasterize_page", lambda *a, **k: b"img")
+        monkeypatch.setattr(
+            "app.documents.ocr_client.OcrClient",
+            lambda *a, **k: SimpleNamespace(
+                extract=lambda img, script: SimpleNamespace(text="देवनागरी", confidence=0.88)))
+        text, conf, err, engine = preprocess._ocr_scanned_page(b"x", 1, 200, "devanagari")
+        assert engine == "deepreef:devanagari"
+        assert text == "देवनागरी" and conf == 0.88
+
+    def test_a_deepreef_failure_falls_back_to_rapidocr(self, monkeypatch):
+        # The Lambda can be unreachable, unauthorised or slow for reasons that
+        # have nothing to do with the page. A Latin reading of a Devanagari
+        # page is poor; an unreadable page is worse.
+        from app.graph.nodes import preprocess
+
+        monkeypatch.setattr("app.documents.pdf_utils.rasterize_page", lambda *a, **k: b"img")
+        def boom(*a, **k):
+            raise RuntimeError("lambda unreachable")
+        monkeypatch.setattr("app.documents.ocr_client.OcrClient", boom)
+        monkeypatch.setattr(preprocess, "_ocr_page", lambda *a: ("fallback text", 0.7, ""))
+        text, conf, err, engine = preprocess._ocr_scanned_page(b"x", 1, 200, "devanagari")
+        assert (text, engine) == ("fallback text", "rapidocr(fallback)")
+
+    def test_the_script_reaches_the_graph_from_upload(self):
+        from app.graph.state import GraphState
+
+        assert GraphState(document_id="d", file_path="x").script == "english"
+        assert GraphState(document_id="d", file_path="x", script="ta").script == "ta"
