@@ -226,7 +226,13 @@ Last reviewed: 2026-11-24
   HONEST STATUS fixed (decision.py): unreadable pages -> INCOMPLETE naming the pages;
   test_rows is judged by test rows (none -> INCOMPLETE; rows without header fields no longer
   INCOMPLETE). tests/test_honest_status_and_regions.py. Batch re-run with both fixes:
-  ../../benchmarks/batch/results_2026-11-24_v2/.
+  ../../benchmarks/batch/results_2026-11-24_v2/ (Excel: Lab_Reports_Latency_Accuracy_Report_v2.xlsx).
+  v2 vs v1 (54 docs): median 18.3s -> 10.7s, mean 31.2 -> 15.3s, p90 61 -> 27s, max 177 ->
+  64s; digital median 22.7 -> 10.4s; scanned 9.8 -> 11.9s (AI-time noise). 1139 rows, 99.9%
+  on their cited page; old-pipeline rows found 94.2% -> 95.0%. Status: VALIDATED 47,
+  CONFLICTED 3, INCOMPLETE 2 (zero test rows: 008 png, VU3 cytology), LOW_CONFIDENCE 2.
+  a516f…pdf 141 -> 129 rows: checked, the later-page images are letterheads/footers only;
+  v1's extra rows came from whole-page OCR re-reading the text layer.
   LOCKED SUITE (2026-11-24): backend/tests/locked/ — 9 tests / 12 items guarding the
   product invariants (strict numbers, rows not on the page refused, test_rows: only
   extraction calls the model + conflicts go to a person, OCR fallback never loses a page,
@@ -247,6 +253,9 @@ Last reviewed: 2026-11-24
 - ocr_client (deepreef-ocr Lambda for Indic scripts) never sends max_words, so those pages
   are capped at the engine's default 80 words.
 - "Description = Brown Colour Powder"-style descriptive rows are extracted as test rows.
+- Under test_rows, image regions on digital pages are OCR'd on page 1 only. A results table
+  pasted as an image on page 2+ of a digital PDF would be missed (not seen in the 54-doc
+  set). Possible fix: also OCR a later page's images when its text layer has no results table.
 
 ### Repo-wide (from before this session)
 
