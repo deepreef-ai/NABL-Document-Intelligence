@@ -92,7 +92,7 @@ Last reviewed: 2026-11-24
 ### Branch and environment
 
 - Work is on branch `feat/15-fast-extraction` (from `feat/demo22` @ c950cf0), all
-  being committed and pushed with a PR to main (no merge). Start the backend with the
+  pushed; PR #14 to main is open for review (2026-11-24; do not merge). Next: the e-Attestation integration plan at ../../INTEGRATION_PLAN.md awaits the user's review and decisions D1-D5 -- no integration code until then. Start the backend with the
   command above.
 - LLM: Bedrock/Nova is denied for IAM user `dr-dev` (and so is lambda:InvokeFunction and
   ECR), so the graph uses `GRAPH_PROVIDER_ORDER=gemini,groq` on free tiers (Gemini ~20
