@@ -31,7 +31,15 @@ from pydantic import BaseModel, Field, field_validator
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, err, normalise_for_match, strict_value_key, similarity, truncate
+from app.graph.nodes.helpers import (
+    audit,
+    err,
+    is_test_rows_profile,
+    normalise_for_match,
+    similarity,
+    strict_value_key,
+    truncate,
+)
 from app.graph.prompts import MAPPING_SYSTEM, mapping_user
 from app.graph.schemas import (
     ExtractedField,
@@ -194,6 +202,17 @@ def map_to_form(state: GraphState) -> dict:
     metrics = state.metrics.model_copy(deep=True)
     entries = []
     errors = []
+
+    if is_test_rows_profile(state):
+        # A results-table reader has no NABL form to fill. MEASURED
+        # 2026-11-23: on a lab report this call took ~37s to place 4 of 102
+        # form fields.
+        return {
+            "current_node": NODE,
+            "form_mappings": [],
+            "audit_log": audit(NODE, "mapping_skipped",
+                               "test_rows profile: no target form to fill"),
+        }
 
     schema = discover_form_schema(state)
     if schema is None or not schema.fields:

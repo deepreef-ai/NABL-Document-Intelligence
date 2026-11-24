@@ -149,6 +149,77 @@ def _image_area_ratio(page) -> float:
     return min(covered / page_area, 1.0)
 
 
+def _image_regions(page, min_fraction: float = 0.005, pad: float = 4.0, limit: int = 8) -> list:
+    """Bounding boxes of the page's raster images, overlapping ones merged.
+
+    Tiny images (below min_fraction of the page) are dropped: a bullet or a
+    rule rendered as a picture carries no text worth a recogniser pass.
+    """
+    import fitz
+
+    try:
+        infos = page.get_image_info()
+    except Exception:  # noqa: BLE001
+        return []
+    area = page.rect.width * page.rect.height or 1.0
+    rects = []
+    for info in infos:
+        bbox = info.get("bbox")
+        if not bbox:
+            continue
+        r = fitz.Rect(bbox) + (-pad, -pad, pad, pad)
+        r &= page.rect
+        if r.is_empty or (r.width * r.height) / area < min_fraction:
+            continue
+        rects.append(r)
+    merged: list = []
+    for r in sorted(rects, key=lambda x: (x.y0, x.x0)):
+        for i, m in enumerate(merged):
+            if m.intersects(r):
+                merged[i] = fitz.Rect(m) | r     # store the union back
+                break
+        else:
+            merged.append(fitz.Rect(r))
+    return merged[:limit]
+
+
+def _ocr_image_regions(page, settings) -> tuple[str, float | None, str]:
+    """OCR only the picture parts of a digital page (letterhead, logo, stamp).
+
+    The text layer already holds everything else, so reading the whole page
+    again is wasted work. MEASURED 2026-11-24 on the 54-report dataset:
+    whole-page augmentation ran the old RapidOCR route at ~10 s/page on any
+    page whose images covered >= 3% (a logo is enough) — 50 of
+    hp-lab-report.pdf's 60 s, and the reason digital PDFs (median 22.7 s) were
+    slower than scans (9.8 s). Cropping to the image regions keeps the
+    letterhead text this feature exists for. Returns (text, confidence, error).
+    """
+    regions = _image_regions(page)
+    if not regions:
+        return "", None, ""
+    lines: list[str] = []
+    confs: list[float] = []
+    try:
+        for rect in regions:
+            png = page.get_pixmap(clip=rect, dpi=settings.ocr_dpi).tobytes("png")
+            if settings.ocr_engine == "deepreef_local":
+                from app.documents import deepreef_local
+
+                result = deepreef_local.extract_page(png, rendered_pdf_page=True)
+                got = result.lines
+            else:
+                from app.documents import local_ocr
+
+                result = local_ocr.extract_english(png)
+                got = getattr(result, "lines", None) or []
+            lines += [clean_text(ln) for ln in got if clean_text(ln)]
+            if getattr(result, "confidence", None) is not None:
+                confs.append(result.confidence)
+    except Exception as exc:  # noqa: BLE001 — augmentation is optional extra text
+        return "", None, str(exc)[:300]
+    return "\n".join(lines), (sum(confs) / len(confs) if confs else None), ""
+
+
 def _merge_ocr_lines(native: str, ocr_text: str) -> str:
     """Append the OCR lines the text layer does not already have.
 
@@ -305,8 +376,172 @@ def _ocr_scanned_page(
         text, conf, error = _ocr_page(pdf_bytes, page_number, dpi)
         return text, conf, (error or note if not text else ""), "rapidocr(fallback)"
 
+    if get_graph_settings().ocr_engine == "deepreef_local":
+        try:
+            from app.documents import deepreef_local, ocr_page_cache
+
+            image = deepreef_local.render_for_ocr(pdf_bytes, page_number, dpi)
+            # Identical pixels + model + settings => identical reading, so a
+            # re-uploaded report skips OCR (~4.3 s/page, MEASURED 2026-11-24).
+            # The cache never raises: any problem is a miss and OCR runs.
+            key = ocr_page_cache.page_key(image)
+            result = ocr_page_cache.get(key) if key else None
+            source = " (cache)" if result is not None else ""
+            if result is None:
+                result = deepreef_local.extract_page(image, rendered_pdf_page=True)
+                if key and result.lines:
+                    ocr_page_cache.put(key, result)
+            text = "\n".join(clean_text(ln) for ln in result.lines if clean_text(ln))
+            if text:
+                return text, result.confidence, "", f"deepreef-local:en [{result.model_used}]{source}"
+            note = "deepreef-local returned no text"
+        except Exception as exc:  # noqa: BLE001 — fall back to RapidOCR, recorded
+            note = f"deepreef-local failed: {str(exc)[:200]}"
+        log.info("ocr: deepreef-local fell back to rapidocr page=%d reason=%s", page_number, note)
+        text, conf, error = _ocr_page(pdf_bytes, page_number, dpi)
+        return text, conf, (error or note if not text else ""), "rapidocr(fallback)"
+
     text, conf, error = _ocr_page(pdf_bytes, page_number, dpi)
     return text, conf, error, "rapidocr"
+
+
+def _prefetch_scanned_pages(path: str, data: bytes, settings, script: str) -> dict:
+    """OCR every scanned page up front, several at a time.
+
+    Only for the deepreef_local engine, whose engines are one per thread with
+    pinned ONNX threads; the RapidOCR path shares one engine and stays
+    sequential. MEASURED 2026-11-23: sequential OCR was 125s of a 148s run on a
+    30-page scan (~4.3-5.3s per page). Returns {page_no: _ocr_scanned_page(...)};
+    any page missing from it is read inline by the normal loop.
+    settings.ocr_worker_mode picks threads (default) or spawned processes.
+    """
+    if settings.ocr_engine in _REMOTE_OCR_ENGINES:
+        return _prefetch_remote(path, data, settings, script)
+    workers = max(1, int(settings.ocr_page_workers))
+    if (settings.ocr_engine != "deepreef_local" or workers == 1 or not settings.ocr_enabled
+            or (script or "english") not in ("english", "en", "latin")):
+        return {}
+    import fitz
+    from concurrent.futures import ThreadPoolExecutor
+
+    scanned = []
+    with fitz.open(path) as doc:
+        for index in range(doc.page_count):
+            try:
+                if not _quality_ok(_page_native_text(doc[index]), _MIN_CHARS):
+                    scanned.append(index + 1)
+            except Exception:  # noqa: BLE001 — the loop records page read errors itself
+                continue
+    if len(scanned) < 2:
+        return {}
+    mode = str(getattr(settings, "ocr_worker_mode", "thread") or "thread").lower()
+    if mode != "process":
+        with ThreadPoolExecutor(max_workers=min(workers, len(scanned)), thread_name_prefix="ocr") as pool:
+            futures = {p: pool.submit(_ocr_scanned_page, data, p, settings.ocr_dpi, script) for p in scanned}
+            return {p: f.result() for p, f in futures.items()}
+    # Process mode: a dead worker (BrokenProcessPool, OOM kill, spawn/pickle
+    # error) must never fail the document, so any pool failure returns {} and
+    # the normal sequential loop OCRs every page inline.
+    try:
+        with _make_ocr_process_pool(min(workers, len(scanned))) as pool:
+            futures = {p: pool.submit(_ocr_page_in_process, data, p, settings.ocr_dpi, script)
+                       for p in scanned}
+            return {p: f.result() for p, f in futures.items()}
+    except Exception as exc:  # noqa: BLE001 — fall back to sequential OCR
+        log.warning("ocr: process pool failed, falling back to sequential OCR: %s", str(exc)[:200])
+        return {}
+
+
+#: Engines that read pages somewhere else, all pages at once (E1, E2):
+#:   deepreef_service — the team's engine in the OCR worker service
+#:                      (ocr_service/app.py) on a stronger host, OCR_SERVICE_URL
+#:   deepreef_lambda  — the deepreef-ocr Lambda, one invoke per page in parallel
+#:                      (needs lambda:InvokeFunction; images leave this host)
+_REMOTE_OCR_ENGINES = ("deepreef_service", "deepreef_lambda")
+
+
+def _scanned_page_numbers(path: str) -> list[int]:
+    import fitz
+
+    scanned = []
+    with fitz.open(path) as doc:
+        for index in range(doc.page_count):
+            try:
+                if not _quality_ok(_page_native_text(doc[index]), _MIN_CHARS):
+                    scanned.append(index + 1)
+            except Exception:  # noqa: BLE001 — the page loop records read errors
+                continue
+    return scanned
+
+
+def _prefetch_remote(path: str, data: bytes, settings, script: str) -> dict:
+    """Read every scanned page with a remote engine in one parallel batch.
+
+    Only successful pages are returned. A page that failed remotely (service
+    down, AccessDenied, timeout) is simply absent, so the page loop reads it
+    inline — _ocr_scanned_page sends any non-deepreef_local engine to RapidOCR
+    — and a remote outage costs speed, never a page.
+    """
+    if not settings.ocr_enabled or (script or "english") not in ("english", "en", "latin"):
+        return {}
+    scanned = _scanned_page_numbers(path)
+    if not scanned:
+        return {}
+    from app.documents import deepreef_local
+
+    images = {p: deepreef_local.render_for_ocr(data, p, settings.ocr_dpi) for p in scanned}
+    out: dict = {}
+    try:
+        if settings.ocr_engine == "deepreef_service":
+            from app.documents.ocr_service_client import extract_pages_remote
+
+            results = extract_pages_remote(images, base_url=settings.ocr_service_url,
+                                           workers=max(1, settings.ocr_page_workers),
+                                           rendered_pdf_page=True)
+            for p, r in results.items():
+                if isinstance(r, Exception):
+                    log.info("ocr: service failed page=%d: %s", p, str(r)[:160])
+                    continue
+                text = "\n".join(clean_text(ln) for ln in r.lines if clean_text(ln))
+                if text:
+                    out[p] = (text, r.confidence, "", f"deepreef-service:en [{r.model_used}]")
+        else:
+            from app.config import get_settings as get_app_settings
+            from app.documents.deepreef_lambda import extract_pages_lambda
+
+            app_settings = get_app_settings()
+            results = extract_pages_lambda(images, function_name=app_settings.ocr_lambda_function_name,
+                                           region=app_settings.ocr_lambda_region,
+                                           max_workers=max(1, settings.ocr_page_workers) * 4,
+                                           timeout=max(30.0, app_settings.ocr_timeout_seconds))
+            for p, (text, conf, error) in results.items():
+                if error:
+                    log.info("ocr: lambda failed page=%d: %s", p, error[:160])
+                    continue
+                text = clean_text(text) and "\n".join(clean_text(ln) for ln in text.splitlines() if clean_text(ln))
+                if text:
+                    out[p] = (text, conf, "", "deepreef-lambda:en")
+    except Exception as exc:  # noqa: BLE001 — remote engine unavailable: read locally
+        log.warning("ocr: %s unavailable, reading pages locally: %s", settings.ocr_engine, str(exc)[:200])
+        return {}
+    return out
+
+
+def _ocr_page_in_process(pdf_bytes: bytes, page_no: int, dpi: int, script: str):
+    """Process-pool worker: module-level so "spawn" can pickle it by name.
+    Returns _ocr_scanned_page's picklable (text, conf, error, engine_label)."""
+    return _ocr_scanned_page(pdf_bytes, page_no, dpi, script)
+
+
+def _make_ocr_process_pool(max_workers: int):
+    """ProcessPoolExecutor with the "spawn" start method: fork is unsafe on
+    macOS (ObjC runtime) and with ONNX/BLAS threads already running. Each
+    process loads its own OCR models (~200-300 MB). Separate so tests can
+    replace it without spawning."""
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    return ProcessPoolExecutor(max_workers=max_workers, mp_context=multiprocessing.get_context("spawn"))
 
 
 def _detect_table(page) -> bool:
@@ -446,6 +681,12 @@ def preprocess_document(state: GraphState) -> dict:
     if state.file_type == "pdf":
         import fitz
 
+        prefetched = _prefetch_scanned_pages(path, data, settings, state.script or "english")
+        if prefetched:
+            entries += audit(NODE, "ocr_prefetched",
+                             f"{len(prefetched)} scanned page(s) read in parallel "
+                             f"({settings.ocr_page_workers} at a time, {settings.ocr_engine})")
+
         with fitz.open(path) as doc:
             total = doc.page_count
             for index in range(total):
@@ -457,7 +698,14 @@ def preprocess_document(state: GraphState) -> dict:
                     page = doc[index]
                     width, height = page.rect.width, page.rect.height
                     native = _page_native_text(page)
-                    has_table = _detect_table(page)
+                    # Table detection only where there is a text layer. On a
+                    # scanned page PyMuPDF's finder reads vector rules, not
+                    # text. MEASURED 2026-11-24 on a 30-page scan: 289 ms/page
+                    # (8.4s per document) and "table" on all 29 scanned pages,
+                    # notes-only pages included. Scanned pages get the flag
+                    # from their OCR text further down instead.
+                    if _quality_ok(native, _MIN_CHARS):
+                        has_table = _detect_table(page)
                 except Exception as exc:  # noqa: BLE001
                     native = ""
                     note = f"page read error: {exc}"[:300]
@@ -476,12 +724,23 @@ def preprocess_document(state: GraphState) -> dict:
                     # pasted in as a picture. Those carry the lab's name and
                     # address on most reports, so a page that is partly image
                     # gets read twice and the halves merged.
+                    # test_rows (e-Attestation) reads image regions on the first
+                    # page only: a letterhead repeats on every page, and the
+                    # attesting lab is identified by its login, not by the
+                    # report — MEASURED 2026-11-24, image-region OCR is still
+                    # ~2.6 s per page.
+                    from app.graph.nodes.helpers import is_test_rows_profile
+
                     if (
                         settings.ocr_enabled
                         and settings.ocr_augments_text_layer
+                        and not (is_test_rows_profile(state) and page_no > 1)
                         and _image_area_ratio(page) >= settings.ocr_image_area_threshold
                     ):
-                        img_text, img_conf, img_error = _ocr_page(data, page_no, settings.ocr_dpi)
+                        if settings.ocr_augment_regions_only:
+                            img_text, img_conf, img_error = _ocr_image_regions(page, settings)
+                        else:
+                            img_text, img_conf, img_error = _ocr_page(data, page_no, settings.ocr_dpi)
                         merged = _merge_ocr_lines(text, img_text)
                         if merged != text:
                             text = merged
@@ -500,12 +759,15 @@ def preprocess_document(state: GraphState) -> dict:
                     # reads it and Docling is skipped for it entirely —
                     # with do_ocr=False Docling has nothing to read here and
                     # would spend a minute per document returning nothing.
-                    ocr_text, ocr_conf, ocr_error, engine = _ocr_scanned_page(
+                    ocr_text, ocr_conf, ocr_error, engine = prefetched.get(page_no) or _ocr_scanned_page(
                         data, page_no, settings.ocr_dpi, state.script or "english")
                     scanned_pages.append(page_no)
                     if ocr_text and _quality_ok(ocr_text, _MIN_CHARS):
                         text, status = ocr_text, PageStatus.OCR
                         ocr_pages.append(page_no)
+                        from app.graph.nodes.chunking import _last_table_header
+
+                        has_table = _last_table_header(ocr_text) is not None
                         entries += audit(NODE, "page_ocr", f"read by {engine}",
                                          page_number=page_no)
                         if ocr_conf is not None and ocr_conf < settings.ocr_low_confidence_threshold:
@@ -580,12 +842,35 @@ def preprocess_document(state: GraphState) -> dict:
     # -------------------------------------------------------------- image
     else:
         ocr_text, ocr_conf, ocr_error = "", None, ""
-        if settings.ocr_enabled:
+        # Image uploads (PNG/JPG photos and scans) read the same way as scanned
+        # PDF pages: deepreef-ocr with row-grouped lines. MEASURED 2026-11-24 on
+        # 006_Lab-report.png: the old path returned the whole page as ONE line
+        # (RapidOCR `.text`), so the compact extractor's line citations could
+        # not be verified and all 20 rows were refused (0 extracted, old
+        # pipeline 33). A photo keeps the full clean-up (illumination,
+        # contrast, sharpen): rendered_pdf_page=False.
+        if settings.ocr_enabled and settings.ocr_engine == "deepreef_local" and \
+                (state.script or "english") in ("english", "en", "latin"):
+            try:
+                from app.documents import deepreef_local
+
+                page = deepreef_local.extract_page(data, rendered_pdf_page=False)
+                ocr_text = "\n".join(clean_text(ln) for ln in page.lines if clean_text(ln))
+                ocr_conf = page.confidence
+                if ocr_text:
+                    entries += audit(NODE, "page_ocr", f"read by deepreef-local:en [{page.model_used}]",
+                                     page_number=1)
+            except Exception as exc:  # noqa: BLE001 — fall back to RapidOCR below
+                log.info("ocr: deepreef-local failed on image, using rapidocr: %s", str(exc)[:200])
+        if settings.ocr_enabled and not ocr_text:
             try:
                 from app.documents import local_ocr
 
                 result = local_ocr.extract_english(data)
-                ocr_text = _with_chart(clean_text(getattr(result, "text", "") or ""), result, data)
+                # One OCR box per line, not the joined blob (see above).
+                lines = [clean_text(ln) for ln in (getattr(result, "lines", None) or [])]
+                text = "\n".join(ln for ln in lines if ln) or clean_text(getattr(result, "text", "") or "")
+                ocr_text = _with_chart(text, result, data)
                 ocr_conf = getattr(result, "confidence", None)
             except Exception as exc:  # noqa: BLE001
                 ocr_error = str(exc)[:300]

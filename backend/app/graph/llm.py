@@ -208,6 +208,9 @@ def call_structured(
 
     Returns an outcome rather than raising, so a node can record the failure
     and let the router decide between retry, recovery and escalation.
+
+    A model "thinking" level, where wanted, is set by the caller as context
+    around this call — see llm/thinking.use_thinking_level.
     """
     settings = get_graph_settings()
     attempts_allowed = max_attempts or settings.max_attempts_per_chunk

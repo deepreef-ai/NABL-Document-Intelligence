@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _utcnow() -> datetime:
@@ -136,6 +136,15 @@ class ExtractedField(BaseModel):
         except (TypeError, ValueError):
             return 0.0
 
+    @field_validator("section_name", "table_context", "exact_source_evidence", "notes",
+                     mode="before")
+    @classmethod
+    def _text_or_empty(cls, v: Any) -> str:
+        # The model sends null (or a bare number) for these descriptive
+        # columns; strict validation rejected the whole chunk over it.
+        # MEASURED: 3 historical chunk failures on section_name/table_context.
+        return "" if v is None else str(v)
+
     @field_validator("field_name", mode="before")
     @classmethod
     def _nonempty(cls, v: Any) -> str:
@@ -190,6 +199,37 @@ class TestRow(BaseModel):
 
     page_number: int | None = None
     exact_source_evidence: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _scalars_to_text(cls, data: Any) -> Any:
+        """Accept a bare number where a text column is expected.
+
+        MEASURED 2026-11-23: the model wrote `"s_no": 1` instead of `"1"`, and
+        strict validation rejected the WHOLE chunk — every row in it — then
+        retried 14 times (~24s each) and still left the document INCOMPLETE.
+        16 runs had hit the same thing on `s_no`. Converting is lossless for an
+        integer; for a decimal the JSON parser has already dropped any trailing
+        zero ("0.70" sent as 0.70 arrives as 0.7), so str() loses nothing
+        further, and evidence validation still compares the number with the
+        page numerically. One odd cell must not cost a page of results.
+        """
+        if not isinstance(data, dict):
+            return data
+        fixed = dict(data)
+        for key in _TEST_ROW_TEXT_FIELDS:
+            value = fixed.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                fixed[key] = str(value)
+        if fixed.get("exact_source_evidence") is None:
+            fixed["exact_source_evidence"] = ""
+        return fixed
+
+
+_TEST_ROW_TEXT_FIELDS = (
+    "panel_name", "section", "test_name", "result", "unit", "reference_range",
+    "flag", "method", "sample_date", "specimen", "s_no",
+)
 
 
 class ChunkExtraction(BaseModel):

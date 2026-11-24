@@ -64,6 +64,19 @@ def err(
     return [make_error(error_type, message, node, **kw)]
 
 
+TEST_ROWS_PROFILE = "test_rows"
+
+
+def is_test_rows_profile(state) -> bool:
+    """True when this run only needs the results table (see
+    GraphSettings.extraction_profile). The run's own choice wins over the
+    setting, so one deployment can serve both kinds of caller."""
+    from app.graph.config import get_graph_settings
+
+    chosen = (getattr(state, "profile", "") or get_graph_settings().extraction_profile or "")
+    return chosen.strip().lower() == TEST_ROWS_PROFILE
+
+
 def now() -> float:
     return time.monotonic()
 

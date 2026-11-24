@@ -24,6 +24,7 @@ from threading import Lock
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
+from app.llm.thinking import use_thinking_level
 from app.graph.nodes.analysis import structure_hint
 from app.graph.nodes.helpers import (
     audit,
@@ -32,6 +33,7 @@ from app.graph.nodes.helpers import (
     field_uid,
     infer_data_type,
     is_placeholder,
+    is_test_rows_profile,
     snake_case,
 )
 from app.graph.schemas import (
@@ -122,28 +124,70 @@ def _sanitise(field: ExtractedField, chunk: ChunkRecord, state: GraphState) -> E
     return field
 
 
+def _extract_compact(chunk: ChunkRecord, state: GraphState):
+    """test_rows profile: numbered lines in, positional arrays out (see
+    compact_rows.py). Same return shape as _extract_one."""
+    from app.graph.nodes.compact_rows import CompactReply, convert, number_lines
+    from app.graph.prompts import COMPACT_ROWS_SYSTEM, compact_rows_user
+
+    collected: list[LlmCallMetric] = []
+    numbered, lines = number_lines(chunk)
+    if not lines:
+        return chunk.chunk_id, [], [], None, collected, []
+
+    with use_thinking_level(get_graph_settings().extraction_thinking_level or None):
+        outcome = call_structured(
+            node=NODE,
+            system=COMPACT_ROWS_SYSTEM,
+            user_text=compact_rows_user(chunk.chunk_id, numbered),
+            output_model=CompactReply,
+            on_metric=collected.append,
+        )
+    if not outcome.ok:
+        return (chunk.chunk_id, [], [],
+                (outcome.error_type, outcome.error_message, outcome.attempts), collected, [])
+
+    tests, header_fields, dropped = convert(outcome.parsed, lines, chunk)  # type: ignore[arg-type]
+    fields = [f for f in (_sanitise(h, chunk, state) for h in header_fields) if f is not None]
+    return chunk.chunk_id, fields, tests, None, collected, dropped
+
+
 def _extract_one(chunk: ChunkRecord, state: GraphState, hint: str, max_fields: int):
-    """Runs in a worker thread. Returns (chunk_id, fields, error, metrics)."""
+    """Runs in a worker thread.
+
+    Returns (chunk_id, fields, tests, failure, metrics, dropped) — `dropped`
+    lists rows the compact path refused because the page does not show them.
+    """
     from app.graph.prompts import EXTRACTION_SYSTEM, extraction_user
+
+    if is_test_rows_profile(state) and get_graph_settings().compact_test_rows:
+        return _extract_compact(chunk, state)
 
     collected: list[LlmCallMetric] = []
 
-    outcome = call_structured(
-        node=NODE,
-        system=EXTRACTION_SYSTEM,
-        user_text=extraction_user(
-            chunk_id=chunk.chunk_id,
-            page_numbers=chunk.page_numbers,
-            text=chunk.text,
-            structure_hint=hint,
-            max_fields=max_fields,
-        ),
-        output_model=ChunkExtraction,
-        on_metric=collected.append,
-    )
+    # Extraction copies values that are already on the page, so it gets the
+    # least from model "thinking" and pays the most for it (it is the widest,
+    # slowest stage). Reasoning-heavy nodes (conflicts, mapping) deliberately
+    # keep the provider default. Set as context around this one call (see
+    # llm/thinking.py) rather than passed as an argument, so call_structured's
+    # signature is unchanged; an unset level leaves the call exactly as it was.
+    with use_thinking_level(get_graph_settings().extraction_thinking_level or None):
+        outcome = call_structured(
+            node=NODE,
+            system=EXTRACTION_SYSTEM,
+            user_text=extraction_user(
+                chunk_id=chunk.chunk_id,
+                page_numbers=chunk.page_numbers,
+                text=chunk.text,
+                structure_hint=hint,
+                max_fields=max_fields,
+            ),
+            output_model=ChunkExtraction,
+            on_metric=collected.append,
+        )
 
     if not outcome.ok:
-        return chunk.chunk_id, [], [], (outcome.error_type, outcome.error_message, outcome.attempts), collected
+        return chunk.chunk_id, [], [], (outcome.error_type, outcome.error_message, outcome.attempts), collected, []
 
     parsed: ChunkExtraction = outcome.parsed  # type: ignore[assignment]
 
@@ -155,7 +199,7 @@ def _extract_one(chunk: ChunkRecord, state: GraphState, hint: str, max_fields: i
             ErrorType.LLM_UNRELATED_RESPONSE,
             f"reply cited chunk_id {parsed.chunk_id!r}, expected {chunk.chunk_id!r}",
             outcome.attempts,
-        ), collected
+        ), collected, []
 
     fields = []
     for f in parsed.fields:
@@ -172,7 +216,7 @@ def _extract_one(chunk: ChunkRecord, state: GraphState, hint: str, max_fields: i
         if t.page_number not in chunk.page_numbers and len(chunk.page_numbers) == 1:
             t.page_number = chunk.page_numbers[0]
         tests.append(t)
-    return chunk.chunk_id, fields, tests, None, collected
+    return chunk.chunk_id, fields, tests, None, collected, []
 
 
 def extract_fields(state: GraphState) -> dict:
@@ -208,15 +252,30 @@ def extract_fields(state: GraphState) -> dict:
         for future in as_completed(futures):
             chunk = futures[future]
             try:
-                chunk_id, fields, chunk_tests, failure, call_metrics = future.result()
+                chunk_id, fields, chunk_tests, failure, call_metrics, dropped = future.result()
             except Exception as exc:  # noqa: BLE001 — a worker crash is a chunk failure
-                chunk_id, fields, chunk_tests, failure, call_metrics = (
-                    chunk.chunk_id, [], [], (ErrorType.NODE_EXCEPTION, str(exc)[:500], 1), []
+                chunk_id, fields, chunk_tests, failure, call_metrics, dropped = (
+                    chunk.chunk_id, [], [], (ErrorType.NODE_EXCEPTION, str(exc)[:500], 1), [], []
                 )
 
             with lock:
                 for m in call_metrics:
                     metrics.record(m)
+
+            # Rows the page does not show are refused, and said so — a silent
+            # drop would read as "the report had fewer tests".
+            for reason in dropped:
+                errors += err(
+                    ErrorType.HALLUCINATED_VALUE, f"test row dropped: {reason}", NODE,
+                    chunk_id=chunk_id, recovery_action="row not extracted; check the page",
+                    resolution_status="RECOVERED",
+                )
+            if dropped:
+                entries += audit(
+                    NODE, "rows_dropped",
+                    f"{len(dropped)} row(s) refused: not found on the cited line",
+                    chunk_id=chunk_id, level="warning",
+                )
 
             record = chunk_index[chunk_id]
             record.attempt_count += 1

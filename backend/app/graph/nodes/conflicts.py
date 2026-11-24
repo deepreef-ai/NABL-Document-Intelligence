@@ -34,7 +34,14 @@ from pydantic import BaseModel, Field
 
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, err, normalise_for_match, strict_value_key, truncate
+from app.graph.nodes.helpers import (
+    audit,
+    err,
+    is_test_rows_profile,
+    normalise_for_match,
+    strict_value_key,
+    truncate,
+)
 from app.graph.prompts import CONFLICT_SYSTEM, conflict_user
 from app.graph.schemas import (
     ConflictCandidate,
@@ -188,25 +195,32 @@ def detect_and_resolve_conflicts(state: GraphState) -> dict:
         for c in adjudicate
     ]
 
-    outcome = call_structured(
-        node=NODE, system=CONFLICT_SYSTEM, user_text=conflict_user(payload),
-        output_model=_ResolutionSet, max_attempts=2, on_metric=metrics.record,
-    )
-
     resolutions: dict[str, _Resolution] = {}
-    if outcome.ok:
-        parsed: _ResolutionSet = outcome.parsed  # type: ignore[assignment]
-        resolutions = {r.normalized_field_name: r for r in parsed.resolutions}
+    if is_test_rows_profile(state):
+        # No model picks a winner here: every conflict goes to a person, which
+        # is the same outcome as a failed adjudication call. A results-table
+        # reader confirms values with the lab before anything is sealed.
+        entries += audit(NODE, "adjudication_skipped",
+                         "test_rows profile: every conflict escalated to manual review",
+                         level="warning")
     else:
-        errors += err(
-            outcome.error_type or ErrorType.LLM_UNAVAILABLE,
-            f"conflict adjudication failed: {outcome.error_message}", NODE,
-            retry_count=outcome.attempts,
-            recovery_action="all conflicts escalated to manual review",
-            resolution_status="RECOVERED",
+        outcome = call_structured(
+            node=NODE, system=CONFLICT_SYSTEM, user_text=conflict_user(payload),
+            output_model=_ResolutionSet, max_attempts=2, on_metric=metrics.record,
         )
-        entries += audit(NODE, "adjudication_unavailable",
-                         "every conflict escalated", level="warning")
+        if outcome.ok:
+            parsed: _ResolutionSet = outcome.parsed  # type: ignore[assignment]
+            resolutions = {r.normalized_field_name: r for r in parsed.resolutions}
+        else:
+            errors += err(
+                outcome.error_type or ErrorType.LLM_UNAVAILABLE,
+                f"conflict adjudication failed: {outcome.error_message}", NODE,
+                retry_count=outcome.attempts,
+                recovery_action="all conflicts escalated to manual review",
+                resolution_status="RECOVERED",
+            )
+            entries += audit(NODE, "adjudication_unavailable",
+                             "every conflict escalated", level="warning")
 
     review_items: list[ManualReviewItem] = []
     resolved = escalated = 0

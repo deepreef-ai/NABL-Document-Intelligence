@@ -1,0 +1,12 @@
+# SUITE.lock - sha256 of every file in tests/locked/.
+# The locked tests define REQUIRED behaviour of the attestation product.
+# They may only change with a deliberate, reviewed reason:
+#   python scripts/lock_tests.py --update --reason "<why>"
+# (the reason and changed files are recorded in tests/locked/LOCK_HISTORY.md).
+d71faa1bced666140d46adb831bc24e8c8da71dfd1732b88b85d0ca4ae9830bf  tests/locked/__init__.py
+1bde499ff68069b131f314da6670cc0dfee0127cbd4500d794c141d520ee9803  tests/locked/conftest.py
+02712b3a5d2eed0bc19095935fea8668568581302c201e3418039d31206b976d  tests/locked/test_lock_integrity.py
+bcafd6430b4a48a4bf4556218c4eaba6b4fb08cfb5433d9e78959237e5309d2e  tests/locked/test_ocr_engine.py
+b331009ea7443f85e72973bf622683a11e56bf3ebff77b8ea7b70f5ef7dcb050  tests/locked/test_real_ocr.py
+c849f4e33955a59bd3e862e223df2ec6f5ffae97b539ddd4a8e4287bbd83abcd  tests/locked/test_test_rows_pipeline.py
+2c516e6fa114bf42f1e1b7cf10717eba1bf5f23f07ce0192ac8c3cec2f688598  tests/locked/test_value_identity.py

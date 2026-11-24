@@ -375,3 +375,60 @@ def reanalysis_user(chunk_id: str, page_numbers: list[int], text: str, reason: s
         f"--- DOCUMENT TEXT ---\n{text}\n--- END DOCUMENT TEXT ---\n\n"
         f"Extract any field-value pairs as JSON."
     )
+
+
+# --------------------------------------------------------------------------
+# F2. Compact results-table extraction (test_rows profile)
+# --------------------------------------------------------------------------
+#
+# Why a second extraction prompt: the general one above asks for ~13 keys plus
+# a verbatim evidence quote per row, so the model writes the document out two
+# or three times and generation time grows with every character. MEASURED
+# 2026-11-23 (hp-lab-report.pdf): extraction was 92% of a 61s run, and the
+# slowest chunks were the ones with the most rows. This prompt asks only for
+# what a results-table reader consumes, as positional arrays, and points at a
+# numbered line instead of quoting it. Page, evidence and verification are
+# derived in code from that line number.
+
+#: Header details worth reading off a lab report. A fixed list on purpose:
+#: open-ended "every field" discovery is what the full profile is for.
+COMPACT_HEADER_KEYS = (
+    "patient_name", "patient_id", "age_sex", "sample_id", "sample_name",
+    "report_number", "ulr_number", "report_date", "collection_date",
+    "received_date", "laboratory_name", "customer_name", "referred_by",
+)
+
+COMPACT_ROWS_SYSTEM = f"""You read the results tables of laboratory test reports.
+
+The input lines are numbered like "12| text". Lines starting "ctx|" are context
+from a neighbouring page: never extract from them.
+
+Reply with ONE JSON object and nothing else:
+{{"panels": [[line, "panel heading"]],
+ "rows":   [[line, "test name", "result", "unit", "reference range", "method", "flag"]],
+ "header": [[line, "key", "value"]]}}
+
+rows — one per analyte or measurement in a results table:
+- line = the number of the line where that test's RESULT is printed.
+- Copy every cell EXACTLY as printed: same spelling, case, symbols and decimals
+  ("0.70" stays "0.70"). Use "" for a column the row does not have.
+- Keep columns apart: "pH 6.5 5-9" is result "6.5" and reference range "5-9".
+- flag is only a printed marker such as "H", "L", "High", "Low", "*"; else "".
+- A "[chart]" block: only lines under "Readings plotted on this chart" are
+  results; numbers on the axes are not.
+- Never invent a row or a value. Skip anything you cannot read.
+
+panels — each heading that groups the rows below it, e.g. "LIVER FUNCTION TEST,
+SERUM". Do not repeat the panel inside rows; each row belongs to the nearest
+panel above it.
+
+header — only these keys, only when printed, value copied exactly:
+{", ".join(COMPACT_HEADER_KEYS)}."""
+
+
+def compact_rows_user(chunk_id: str, numbered_text: str) -> str:
+    return (
+        f"chunk_id: {chunk_id}\n\n"
+        f"--- NUMBERED DOCUMENT LINES ---\n{numbered_text}\n--- END ---\n\n"
+        f"Return the JSON object."
+    )

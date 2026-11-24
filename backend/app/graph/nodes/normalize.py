@@ -33,7 +33,15 @@ from datetime import date
 
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, clean_text, err, normalise_for_match, strict_value_key, snake_case
+from app.graph.nodes.helpers import (
+    audit,
+    clean_text,
+    err,
+    is_test_rows_profile,
+    normalise_for_match,
+    snake_case,
+    strict_value_key,
+)
 from app.graph.prompts import MERGE_SYSTEM, merge_user
 from app.graph.schemas import ExtractedField, MergeRecord
 from app.graph.state import GraphState
@@ -164,7 +172,15 @@ def normalize_and_merge(state: GraphState) -> dict:
 
     # ---- 3. semantic grouping across different names ---------------------
     distinct = sorted(by_name)
-    if _MIN_NAMES_FOR_LLM <= len(distinct) <= _MAX_NAMES_FOR_LLM:
+    if is_test_rows_profile(state):
+        # Cross-name merging tidies header fields for the NABL form; a
+        # results-table reader does not consume them. Exact-name merges
+        # (above) still apply.
+        entries += audit(
+            NODE, "semantic_merge_skipped",
+            "test_rows profile: exact-name merging only, no merge call",
+        )
+    elif _MIN_NAMES_FOR_LLM <= len(distinct) <= _MAX_NAMES_FOR_LLM:
         summaries = []
         for name in distinct:
             sample = by_name[name][0]

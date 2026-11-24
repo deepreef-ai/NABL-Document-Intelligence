@@ -20,7 +20,7 @@ from collections import defaultdict
 
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
-from app.graph.nodes.helpers import audit, err
+from app.graph.nodes.helpers import audit, err, is_test_rows_profile
 from app.graph.schemas import (
     ChunkStatus,
     CompletenessReport,
@@ -115,6 +115,12 @@ def check_completeness(state: GraphState) -> dict:
     for f in fields:
         if f.page_number is not None:
             fields_by_page[f.page_number] += 1
+    # Results-table rows count too. MEASURED 2026-11-23: a page holding 26
+    # test rows but no header fields read as "produced nothing", was sent back
+    # for re-analysis twice (+24s), and each round appended its rows again.
+    for t in state.tests:
+        if t.page_number is not None:
+            fields_by_page[t.page_number] += 1
 
     barren = []
     for page in sorted(readable):
@@ -132,7 +138,17 @@ def check_completeness(state: GraphState) -> dict:
     # Only the barren pages, and only if we have rounds left. Failed chunks are
     # the recovery agent's business, not re-analysis.
     targets: list[str] = []
-    if barren and state.reanalysis_count < settings.max_reanalysis_rounds:
+    # test_rows: a page with no results table is ordinary — the notes, stamp and
+    # "End of Report" page every lab report ends with. Re-reading it cannot
+    # find rows, and re-extracting its chunk appends the neighbouring table's
+    # rows again. MEASURED 2026-11-23 on a 30-page scan: 5 chunks re-read twice,
+    # ~50 duplicate rows (precision 84%), +12s. Barren pages are still reported.
+    if is_test_rows_profile(state):
+        if barren:
+            entries += audit(NODE, "reanalysis_skipped",
+                             f"test_rows profile: {len(barren)} page(s) without results "
+                             f"left as read: {barren[:20]}")
+    elif barren and state.reanalysis_count < settings.max_reanalysis_rounds:
         for c in state.chunks:
             if c.status == ChunkStatus.PROCESSED and any(p in barren for p in c.page_numbers):
                 targets.append(c.chunk_id)

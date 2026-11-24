@@ -73,7 +73,24 @@ def _warm_docling() -> None:
     so the upload waits on the build already in progress instead of starting a
     second one. Worst case it waits as long as it does today; best case, and in
     the normal case, the converter is ready before the first upload arrives.
+
+    Only when USE_DOCLING is on. warm_docling_converter() checks only that
+    Docling is *installed*, not that the feature is enabled, so with the flag
+    off (the default) every startup paid for a converter nothing would ever
+    use — MEASURED 2026-11-24: +262 MB RSS and ~7 s on an 8 GB laptop that was
+    already swapping, which slowed OCR and everything else. With the flag on,
+    nothing changes here; and if the flag is turned on without a restart,
+    parse_document_with_docling still builds the converter lazily on first use,
+    so skipping the warm-up never disables the feature, it only defers its cost.
+    /health keeps reporting docling_warm (False when skipped) so its shape is
+    unchanged for existing callers.
     """
+    from app.graph.config import get_graph_settings
+
+    if not get_graph_settings().use_docling:
+        log.info("docling_warmup_skipped reason=USE_DOCLING-off")
+        return
+
     from app.graph.docling_adapter import warm_docling_converter
 
     threading.Thread(

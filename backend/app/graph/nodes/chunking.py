@@ -70,6 +70,52 @@ def _split_oversized(page_no: int, text: str, limit: int) -> list[str]:
     return final
 
 
+#: Words that appear in lab-report / certificate table header rows. A line
+#: with two or more of them is treated as a column header.
+_HEADER_WORDS = (
+    "test", "tests", "parameter", "parameters", "result", "results", "unit",
+    "units", "method", "reference", "specification", "specifications", "limit",
+    "limits", "observed", "value", "values", "range", "characteristic",
+    "requirement", "protocol", "loq", "lod",
+)
+
+
+def _header_score(line: str) -> int:
+    words = {w.strip(".:()[]/-,").lower() for w in line.split()}
+    return sum(1 for w in _HEADER_WORDS if w in words)
+
+
+def _last_table_header(text: str) -> str | None:
+    """The last line in `text` that looks like a table's column header."""
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if 0 < len(stripped) <= 200 and _header_score(stripped) >= 2:
+            return stripped
+    return None
+
+
+def _continuation_text(page_no: int, pieces: list[str], index: int) -> str:
+    """Text for split part `index` of a dense page.
+
+    Splitting a page mid-table hands later parts rows with no column names, so
+    the model has to guess which number is the result and which the reference
+    range. The most recent header line from the earlier parts is repeated at
+    the top, marked as context. It is the page's own text, so evidence
+    validation still finds every cited value on the cited page.
+    """
+    piece = pieces[index]
+    if index == 0:
+        return piece
+    header = _last_table_header("\n".join(pieces[:index]))
+    if not header or header in piece:
+        return piece
+    return (
+        f"[continuation of page {page_no}, part {index + 1} of {len(pieces)}; "
+        f"table header repeated for context, do not extract it as a value]\n"
+        f"{header}\n\n{piece}"
+    )
+
+
 def create_chunks(state: GraphState) -> dict:
     settings = get_graph_settings()
     limit = settings.max_chunk_chars
@@ -129,7 +175,7 @@ def create_chunks(state: GraphState) -> dict:
                 chunks.append(ChunkRecord(
                     chunk_id=f"{state.document_id}::c{seq:04d}",
                     page_numbers=[page_no],
-                    text=_page_block(page_no, piece),
+                    text=_page_block(page_no, _continuation_text(page_no, pieces, i)),
                     char_count=len(piece),
                     status=ChunkStatus.PENDING,
                     has_table=has_table,

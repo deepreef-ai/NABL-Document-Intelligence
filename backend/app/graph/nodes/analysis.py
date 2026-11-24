@@ -22,7 +22,7 @@ import logging
 from app.graph.config import get_graph_settings
 from app.graph.errors import ErrorType
 from app.graph.llm import call_structured
-from app.graph.nodes.helpers import audit, err, page_outline, truncate
+from app.graph.nodes.helpers import audit, err, is_test_rows_profile, page_outline, truncate
 from app.graph.prompts import ANALYSIS_SYSTEM, analysis_user
 from app.graph.schemas import DocumentStructure
 from app.graph.state import GraphState
@@ -48,6 +48,22 @@ def analyse_document(state: GraphState) -> dict:
                 document_type="unknown", notes="no readable text to analyse"
             ),
             "audit_log": audit(NODE, "skipped", "no readable pages", level="warning"),
+        }
+
+    if is_test_rows_profile(state):
+        # The caller already knows this is a lab report and wants its results
+        # table; the structure pass only steers general field discovery.
+        # Extraction runs without structural hints, exactly as it does when
+        # this call fails.
+        return {
+            "current_node": NODE,
+            "document_type": "lab test report",
+            "document_structure": DocumentStructure(
+                document_type="lab test report",
+                notes="structure analysis skipped (test_rows profile)",
+            ),
+            "audit_log": audit(NODE, "analysis_skipped",
+                               "test_rows profile: no structure analysis call"),
         }
 
     outline = truncate(page_outline(readable, state.page_metadata), _MAX_OUTLINE_CHARS)

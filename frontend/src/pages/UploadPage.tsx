@@ -45,6 +45,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+//: Per-document wall-clock timer: starts when the file is picked (so it
+//: includes the upload itself), stops when the server reports the document
+//: done — extracted or failed. `end` stays unset while still running.
+type Timer = { start: number; end?: number };
+
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 //: Deliberately NOT remembered across visits. Returning to the upload screen
 //: to add a NEW document used to reuse the previous application and list its
 //: documents, so the last file was still sitting there — it read as though the
@@ -64,7 +76,17 @@ export default function UploadPage() {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Record<string, DocumentStatus>>({});
+  const [timers, setTimers] = useState<Record<string, Timer>>({});
+  const [now, setNow] = useState(() => Date.now());
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Tick once a second, but only while some timer is still running.
+  const anyTimerRunning = Object.values(timers).some((t) => t.end === undefined);
+  useEffect(() => {
+    if (!anyTimerRunning) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [anyTimerRunning]);
   // Set on unmount, so a poll loop started here stops calling setState once
   // the user has navigated to the review screen.
   const cancelledRef = useRef(false);
@@ -119,7 +141,13 @@ export default function UploadPage() {
       }
 
       setProgress((current) => ({ ...current, [documentId]: status }));
-      if (status.done) return;
+      if (status.done) {
+        const finishedAt = Date.now();
+        setTimers((current) => current[documentId]
+          ? { ...current, [documentId]: { ...current[documentId], end: finishedAt } }
+          : current);
+        return;
+      }
       await sleep(POLL_INTERVAL_MS);
     }
 
@@ -158,7 +186,10 @@ export default function UploadPage() {
     cancelledRef.current = false;
     try {
       for (const file of Array.from(files)) {
+        const startedAt = Date.now();
+        setNow(startedAt);
         const doc = await uploadDocument(applicationId, file, script);
+        setTimers((current) => ({ ...current, [doc.id]: { start: startedAt } }));
         setDocuments((docs) => [...docs.filter((d) => d.id !== doc.id), doc]);
         // Upload answers 202 the moment the row exists and extracts
         // afterwards, so the document arrives here as "processing" and would
@@ -235,9 +266,18 @@ export default function UploadPage() {
           const status = live?.status ?? d.status;
           const pages = live?.page_count ?? d.page_count;
           const fields = live?.field_count;
+          const timer = timers[d.id];
           return (
             <li key={d.id} className={`document-status-${status}`}>
               <strong>{d.filename}</strong> — {status}
+              {timer && (
+                <span className="upload-timer">
+                  {" · "}
+                  {timer.end === undefined
+                    ? `⏱ ${formatElapsed(now - timer.start)}`
+                    : `took ${formatElapsed(timer.end - timer.start)}`}
+                </span>
+              )}
               {pages != null && <span> · {pages} page{pages === 1 ? "" : "s"}</span>}
               {fields != null && status === "extracted" && (
                 <span> · {fields} field{fields === 1 ? "" : "s"}</span>

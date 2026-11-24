@@ -81,6 +81,9 @@ class GraphState(BaseModel):
     #: so file_name is "tmpn0yclbyd.pdf" and the gold-shaped output recorded
     #: that as original_filename. Empty means "no better name than the path".
     display_name: str = ""
+    #: Pipeline shape for this run ("full" or "test_rows"); empty means the
+    #: EXTRACTION_PROFILE setting decides. See GraphSettings.extraction_profile.
+    profile: str = ""
     file_type: str = ""
     file_size_bytes: int = 0
     document_type: str = "unknown"

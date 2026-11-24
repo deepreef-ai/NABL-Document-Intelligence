@@ -30,7 +30,7 @@ import logging
 import time
 
 from app.graph.config import get_graph_settings
-from app.graph.nodes.helpers import audit
+from app.graph.nodes.helpers import audit, is_test_rows_profile
 from app.graph.schemas import (
     ConflictResolution,
     ExtractionStatus,
@@ -70,7 +70,27 @@ def decide(state: GraphState) -> dict:
         reasons.append("completeness check failed: pages or chunks unaccounted for")
         reasons.extend(completeness.reasons[:4])
 
-    elif not fields:
+    # Honest status (2026-11-24). A page nobody could read means the result
+    # may be missing content, whatever else went right. MEASURED: with OCR
+    # broken, a 30-page scan reported "VALIDATED: all 30 page(s) processed"
+    # while 29 pages were unreadable.
+    elif completeness is not None and completeness.pages_unreadable:
+        status = FinalStatus.INCOMPLETE
+        unreadable = completeness.pages_unreadable
+        reasons.append(
+            f"{len(unreadable)} of {completeness.pages_total} page(s) could not be read "
+            f"(pages {unreadable[:20]}); anything on them is missing from this result"
+        )
+
+    # test_rows (e-Attestation) is judged by its results table: header fields
+    # are optional there. MEASURED on the 54-report dataset: image reports
+    # with all their test rows were "INCOMPLETE" (no header fields), and one
+    # with zero rows was "VALIDATED".
+    elif is_test_rows_profile(state) and not state.tests:
+        status = FinalStatus.INCOMPLETE
+        reasons.append("no test results were extracted from the document")
+
+    elif not fields and not is_test_rows_profile(state):
         status = FinalStatus.INCOMPLETE
         reasons.append("no field-value pairs were extracted from the document")
 
@@ -81,7 +101,9 @@ def decide(state: GraphState) -> dict:
             if i.kind in ("ambiguous_mapping", "unsupported", "failed_chunk")
         ]
         verified = [f for f in fields if f.extraction_status == ExtractionStatus.VERIFIED]
-        verified_ratio = len(verified) / len(fields)
+        # No header fields is possible under test_rows; its rows are verified
+        # against their cited line at extraction, so nothing is unverified.
+        verified_ratio = len(verified) / len(fields) if fields else 1.0
         failed_chunks = list(state.failed_chunks)
 
         # ---- 3. conflicted -------------------------------------------------

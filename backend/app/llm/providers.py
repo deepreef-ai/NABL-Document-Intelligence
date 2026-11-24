@@ -6,6 +6,7 @@ import httpx
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
+from app.llm.thinking import current_thinking_level, gemini_thinking_config
 from app.llm.base import (
     LlmProvider,
     LlmProviderError,
@@ -157,6 +158,12 @@ class GeminiProvider(LlmProvider):
             # the result — same defensive contract every provider has, since a
             # truncated reply is still unparseable however it was requested.
             generation_config["responseMimeType"] = "application/json"
+        # Set by the caller (e.g. the graph's extraction node) via
+        # llm/thinking.py; absent unless configured, so default calls are
+        # byte-identical to before.
+        thinking = gemini_thinking_config(self.model, current_thinking_level())
+        if thinking:
+            generation_config["thinkingConfig"] = thinking
 
         payload = {
             "system_instruction": {"parts": [{"text": system}]},

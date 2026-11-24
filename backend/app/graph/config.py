@@ -87,9 +87,72 @@ class GraphSettings(BaseSettings):
     #: The binding limit in practice is OUTPUT tokens, not input context — a
     #: chunk small enough to read is not necessarily small enough to answer.
     max_fields_per_chunk: int = 120
+    #: Model "thinking" for the extraction node only: minimal/low/medium/high,
+    #: blank = provider default (unchanged behaviour). Honoured by Gemini,
+    #: ignored by other providers. MEASURED 2026-11-23 on gemini-3.6-flash:
+    #: "minimal" removed ~1k thinking tokens per call (7.8s -> 5.6s on a
+    #: 14-row report) with the same 14/14 rows found. Validate on the gold
+    #: set before making it the default — see llm/thinking.py.
+    extraction_thinking_level: str = ""
+    #: Which pipeline shape a run uses when the caller does not say.
+    #:   "full"      — every node as before (NABL application-form filling).
+    #:   "test_rows" — for lab-report readers such as NABL e-Attestation, which
+    #:                 need the results table, not the NABL 151 form. Skips the
+    #:                 four LLM calls that only serve form filling: structure
+    #:                 analysis, semantic field merging, conflict adjudication
+    #:                 (conflicts are escalated to a person instead) and form
+    #:                 mapping. Extraction and the deterministic evidence checks
+    #:                 are unchanged. MEASURED 2026-11-23, hp-lab-report.pdf:
+    #:                 those four calls were ~70s of a 146s run.
+    extraction_profile: str = "full"
+    #: test_rows profile only: numbered lines in, positional arrays out, with
+    #: page/evidence derived in code and every row verified against its line
+    #: (graph/nodes/compact_rows.py). False falls back to the general
+    #: extraction prompt — kept for A/B accuracy comparison.
+    compact_test_rows: bool = True
 
     # ---- OCR -------------------------------------------------------------
     ocr_enabled: bool = True
+    #: Engine for English scanned pages:
+    #:   "rapidocr"       — RapidOCR's bundled model, one page at a time (previous behaviour)
+    #:   "deepreef_local" — the team's deepreef-ocr engine in-process, English
+    #:                      model, pages read in parallel (documents/deepreef_local.py)
+    #: Indic/Arabic scripts are unaffected: they keep the deepreef-ocr Lambda.
+    ocr_engine: str = "rapidocr"
+    #: Where deepreef-ocr's model files live; blank = <DEEPREEF_OCR_PATH>/deepreef_ocr/models.
+    deepreef_model_dir: str = ""
+    #: deepreef_local only: pages OCR'd at the same time, and ONNX threads per
+    #: page. Keep workers x threads near the core count (M1: 4 x 2 = 8).
+    ocr_page_workers: int = 4
+    #: OCR_ENGINE=deepreef_service: base URL of the OCR worker service
+    #: (backend/ocr_service/app.py, run on a host with more cores/RAM).
+    ocr_service_url: str = "http://127.0.0.1:8100"
+    ocr_threads_per_page: int = 2
+    #: deepreef_local only: "thread" (default) or "process" for the page pool.
+    #: WHY: threads gave no speed-up because the Python pre/post-processing
+    #: around each box holds the GIL. "process" gives real parallelism on hosts
+    #: with spare cores and RAM, but each process loads its own models
+    #: (~200-300 MB); MEASURED no gain on the 8 GB M1 laptop, which swaps.
+    #: Any process-pool failure falls back to sequential OCR.
+    ocr_worker_mode: str = "thread"
+    #: deepreef_local only. Render PDF pages straight at the OCR engine's size
+    #: (longest side 1536 px) instead of at ocr_dpi and then shrinking.
+    ocr_render_to_target: bool = True
+    #: deepreef_local only. Skip the photo-oriented clean-up (illumination,
+    #: contrast, sharpen, JPEG re-compression) for rendered PDF pages; camera
+    #: images keep the full set. Both switches are accuracy-gated by
+    #: scripts/ocr_benchmark.py — turn off if a document set reads worse.
+    ocr_clean_scan_profile: bool = True
+    #: deepreef_local only. Reuse the reading of a page whose rendered pixels,
+    #: model file and OCR settings are identical (documents/ocr_page_cache.py).
+    #: MEASURED 2026-11-24: OCR is ~4.3 s per scanned page, 111 s for a 29-page
+    #: scan, and re-uploading the same report re-OCR'd every page.
+    ocr_page_cache_enabled: bool = True
+    #: Blank = `ocr_cache` next to graph_sqlite_path (graph_storage/ocr_cache).
+    ocr_page_cache_dir: str = ""
+    #: The cache holds OCR text of patient reports, so it must not live forever:
+    #: older entries are misses and are deleted. Default 7 days.
+    ocr_page_cache_ttl_hours: float = 168.0
 
     # --- Docling: document structure only (app/graph/docling_adapter.py) ---
     #: Off by default. Docling is an optional dependency pulling 45 packages
@@ -130,6 +193,11 @@ class GraphSettings(BaseSettings):
     #: A signature scribble or a small logo is not worth a second read; a
     #: letterhead band across the top is.
     ocr_image_area_threshold: float = 0.03
+    #: Augment by OCR-ing only the image REGIONS (letterhead, logo, stamp), not
+    #: the whole page — the text layer already has the rest. MEASURED
+    #: 2026-11-24: whole-page augmentation was ~10 s/page and 50 of
+    #: hp-lab-report.pdf's 60 s. False restores whole-page OCR.
+    ocr_augment_regions_only: bool = True
 
     # ---- thresholds ------------------------------------------------------
     verified_confidence_threshold: float = 0.75
